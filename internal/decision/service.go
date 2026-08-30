@@ -3,13 +3,13 @@
 // and always returns a verdict — it never returns a transport error in place of
 // a decision, because "answer, and fail closed" is the whole contract.
 //
-//	1. ingress      — authenticate the caller (mTLS) and take the request
-//	2. resolveToken — keyed reads of token, block-state and overlay
-//	3. runPredicates— the deterministic spine P1-P6 (before any feature read)
-//	4. readFeatures — one keyed multi-get, with staleness
-//	5. scoreEnsemble— fold the figures into one calibrated probability
-//	6. decide       — expected loss vs interruption cost
-//	7. respond      — reply to the caller, THEN emit provenance off the clock
+//  1. ingress      — authenticate the caller (mTLS) and take the request
+//  2. resolveToken — keyed reads of token, block-state and overlay
+//  3. runPredicates— the deterministic spine P1-P6 (before any feature read)
+//  4. readFeatures — one keyed multi-get, with staleness
+//  5. scoreEnsemble— fold the figures into one calibrated probability
+//  6. decide       — expected loss vs interruption cost
+//  7. respond      — reply to the caller, THEN emit provenance off the clock
 //
 // A refusing predicate settles the request at stage 3 and stages 4-6 are
 // skipped. Any backend error that means we cannot know what we must know fails
@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/peer"
 
 	pb "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1"
+	"github.com/Sagarkhandagre897/AgentShield/internal/bus"
 	"github.com/Sagarkhandagre897/AgentShield/internal/domain"
 	"github.com/Sagarkhandagre897/AgentShield/internal/features"
 	"github.com/Sagarkhandagre897/AgentShield/internal/predicate"
@@ -47,6 +48,20 @@ type NopSink struct{}
 // Emit does nothing.
 func (NopSink) Emit(context.Context, *domain.ProvenanceRecord) {}
 
+// EventPublisher publishes one decision.made event per evaluation to the
+// asynchronous plane, after the reply. bus.Bus satisfies it; the in-memory build
+// hands a NopPublisher. This is the bus-down meeting point of the two planes: the
+// clock announces the decision and never reads back.
+type EventPublisher interface {
+	Publish(ctx context.Context, ev domain.Event) error
+}
+
+// NopPublisher drops events. Default when no publisher is configured.
+type NopPublisher struct{}
+
+// Publish does nothing.
+func (NopPublisher) Publish(context.Context, domain.Event) error { return nil }
+
 // Config assembles a Service. Only the stores and feature reader are required;
 // the rest default to the standard scorer, a no-op sink, mTLS identity and the
 // wall clock.
@@ -57,6 +72,7 @@ type Config struct {
 	Scorer   score.Scorer
 	Params   score.Params
 	Sink     ProvenanceSink
+	Events   EventPublisher                   // decision.made goes here, after the reply
 	Identify func(ctx context.Context) string // caller identity from the transport
 	Now      func() int64                     // epoch seconds
 }
@@ -70,6 +86,7 @@ type Service struct {
 	scorer   score.Scorer
 	params   score.Params
 	sink     ProvenanceSink
+	events   EventPublisher
 	identify func(ctx context.Context) string
 	now      func() int64
 }
@@ -85,6 +102,9 @@ func New(cfg Config) *Service {
 	if cfg.Sink == nil {
 		cfg.Sink = NopSink{}
 	}
+	if cfg.Events == nil {
+		cfg.Events = NopPublisher{}
+	}
 	if cfg.Identify == nil {
 		cfg.Identify = MTLSIdentity
 	}
@@ -98,6 +118,7 @@ func New(cfg Config) *Service {
 		scorer:   cfg.Scorer,
 		params:   cfg.Params,
 		sink:     cfg.Sink,
+		events:   cfg.Events,
 		identify: cfg.Identify,
 		now:      cfg.Now,
 	}
@@ -170,8 +191,11 @@ func (s *Service) Evaluate(ctx context.Context, in *pb.OrderContext) (*pb.Verdic
 }
 
 // respond builds the lean caller verdict and, off the caller's clock, hands the
-// full provenance record to the sink. The record is derived from the verdict
-// that is being returned, so provenance always reflects what the caller saw.
+// full provenance record to the sink and announces the decision on the bus. Both
+// side effects are derived from the verdict being returned, so provenance and the
+// event always reflect what the caller saw. This is the reply-then-emit seam and
+// the two planes' bus-down meeting point: we answer first, then tell the async
+// plane, and never read back.
 func (s *Service) respond(ctx context.Context, in *pb.OrderContext, now int64, ans pb.Answer, code pb.Code, predicateFailed string, policyVersion int) *pb.Verdict {
 	v := &pb.Verdict{
 		EvaluationId: in.GetEvaluationId(),
@@ -188,11 +212,36 @@ func (s *Service) respond(ctx context.Context, in *pb.OrderContext, now int64, a
 		PolicyVersion:   policyVersion,
 		TS:              now,
 	}
-	// Reply-then-emit: the write outlives the request, so detach cancellation
-	// (keep any values) and emit off the critical path.
-	go s.sink.Emit(context.WithoutCancel(ctx), rec)
+	// The event_id is the evaluation_id: exactly one decision.made per evaluation,
+	// so a redelivery folds once. The stream-processor spends the nonce only when
+	// the decision was an ALLOW.
+	ev := bus.DecisionMadeEvent(in.GetEvaluationId(), in.GetTokenId(), now, answerString(ans), in.GetNonce(), in.GetAmountPaise())
+
+	// Reply-then-emit: both writes outlive the request, so detach cancellation
+	// (keep any values) and run off the critical path. Provenance is recorded
+	// before the decision is announced.
+	go func() {
+		dctx := context.WithoutCancel(ctx)
+		s.sink.Emit(dctx, rec)
+		_ = s.events.Publish(dctx, ev)
+	}()
 
 	return v
+}
+
+// answerString maps a verdict answer onto the decision string the bus carries,
+// keeping the bus contract free of the generated protobuf enum.
+func answerString(a pb.Answer) string {
+	switch a {
+	case pb.Answer_ANSWER_ALLOW:
+		return bus.DecisionAllow
+	case pb.Answer_ANSWER_STEP_UP:
+		return bus.DecisionStepUp
+	case pb.Answer_ANSWER_BLOCK:
+		return bus.DecisionBlock
+	default:
+		return ""
+	}
 }
 
 // evidence maps the feature view onto the flat Evidence the scorer reads: each

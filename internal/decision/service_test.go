@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pb "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1"
+	"github.com/Sagarkhandagre897/AgentShield/internal/bus"
 	"github.com/Sagarkhandagre897/AgentShield/internal/domain"
 	"github.com/Sagarkhandagre897/AgentShield/internal/features"
 	"github.com/Sagarkhandagre897/AgentShield/internal/score"
@@ -236,5 +237,97 @@ func TestConsumptionFrac(t *testing.T) {
 	}
 	if f := consumptionFrac(nil, nil); f != 0 {
 		t.Fatalf("no mandate/lien must be 0, got %v", f)
+	}
+}
+
+// chanPublisher captures the decision.made events respond() emits so tests can
+// assert on them deterministically (the receive synchronises with the emit
+// goroutine).
+type chanPublisher struct{ ch chan domain.Event }
+
+func (c *chanPublisher) Publish(_ context.Context, ev domain.Event) error {
+	c.ch <- ev
+	return nil
+}
+
+func (c *chanPublisher) wait(t *testing.T) domain.Event {
+	t.Helper()
+	select {
+	case ev := <-c.ch:
+		return ev
+	case <-time.After(2 * time.Second):
+		t.Fatal("no decision.made event published")
+		return domain.Event{}
+	}
+}
+
+func newPublishingService(ts store.TokenStore, ps store.PolicyStore, fs store.FeatureStore, identity string) (*Service, *chanPublisher) {
+	pub := &chanPublisher{ch: make(chan domain.Event, 8)}
+	svc := New(Config{
+		Tokens:   ts,
+		Policies: ps,
+		Features: features.NewReader(fs, features.DefaultStalenessBudgetSeconds),
+		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
+		Events:   pub,
+		Identify: func(context.Context) string { return identity },
+		Now:      func() int64 { return nowT },
+	})
+	return svc, pub
+}
+
+// TestEvaluatePublishesDecisionMade: an ALLOW announces itself on the bus with
+// the nonce and amount the stream-processor needs to spend the nonce, keyed by
+// evaluation_id so a redelivery folds once and partitioned by token_id.
+func TestEvaluatePublishesDecisionMade(t *testing.T) {
+	ts, ps, fs := seed(t)
+	svc, pub := newPublishingService(ts, ps, fs, "caller_1")
+
+	v, _ := svc.Evaluate(context.Background(), order())
+	if v.Decision != pb.Answer_ANSWER_ALLOW {
+		t.Fatalf("want ALLOW, got %s", v.Decision)
+	}
+
+	ev := pub.wait(t)
+	if ev.Type != bus.EventDecisionMade {
+		t.Fatalf("want %s, got %s", bus.EventDecisionMade, ev.Type)
+	}
+	if ev.EventID != "eval_1" { // event_id == evaluation_id, so the async plane folds it once
+		t.Fatalf("event_id must be the evaluation_id, got %q", ev.EventID)
+	}
+	if ev.TokenID != "tok_1" { // the partition key
+		t.Fatalf("token_id mismatch, got %q", ev.TokenID)
+	}
+	if ev.OccurredAt != nowT {
+		t.Fatalf("occurred_at must be the decision time, got %d", ev.OccurredAt)
+	}
+	if d, _ := bus.PayloadString(ev, bus.PayloadDecision); d != bus.DecisionAllow {
+		t.Fatalf("decision payload must be ALLOW, got %q", d)
+	}
+	if n, _ := bus.PayloadString(ev, bus.PayloadNonce); n != "nonce_new" {
+		t.Fatalf("nonce payload mismatch, got %q", n)
+	}
+	if amt, _ := bus.PayloadInt64(ev, bus.PayloadAmountPaise); amt != 50_000 {
+		t.Fatalf("amount payload mismatch, got %d", amt)
+	}
+}
+
+// TestEvaluatePublishesOnBlock: every decision is announced, not just ALLOWs — a
+// blocked replay still emits decision.made carrying BLOCK, and it is the
+// stream-processor's decision-gate (not the publisher) that declines to spend the
+// nonce.
+func TestEvaluatePublishesOnBlock(t *testing.T) {
+	ts, ps, fs := seed(t)
+	svc, pub := newPublishingService(ts, ps, fs, "caller_1")
+
+	req := order()
+	req.Nonce = "nonce_old" // already in the lien → P1 BLOCK
+
+	v, _ := svc.Evaluate(context.Background(), req)
+	if v.Decision != pb.Answer_ANSWER_BLOCK {
+		t.Fatalf("want BLOCK, got %s", v.Decision)
+	}
+	ev := pub.wait(t)
+	if d, _ := bus.PayloadString(ev, bus.PayloadDecision); d != bus.DecisionBlock {
+		t.Fatalf("a block must still be announced as BLOCK, got %q", d)
 	}
 }
