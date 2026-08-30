@@ -37,10 +37,22 @@ import (
 // Config tunes the assembled system. Every field is optional: with a zero Config
 // the service authenticates via mTLS, the workers use the wall clock, and the bus
 // retries a failing handler three times before dead-lettering.
+//
+// The four backend fields split the process. Left nil (the dev/test default), New
+// builds in-memory stores and an in-memory bus and runs the three workers in THIS
+// process — one runnable system with no external infra. Supplied together (Redis
+// stores + a Kafka bus), New wires only the decision service and does NOT run the
+// workers: they live in cmd/worker, and registering them here would double-process
+// every event. Close then owns the provided bus's shutdown.
 type Config struct {
 	Identify   func(ctx context.Context) string // caller identity (default: mTLS peer cert)
 	Now        func() int64                     // clock for the workers and the service (default: wall clock)
 	BusRetries int                              // at-least-once retry bound for the in-memory bus
+
+	Tokens   store.TokenStore   // durable token/block-state store (default: in-memory)
+	Policies store.PolicyStore  // durable policy store (default: in-memory)
+	Features store.FeatureStore // durable feature store (default: in-memory)
+	Bus      bus.Bus            // durable bus (default: in-memory)
 }
 
 // App is the wired in-process system. The stores, bus and CHAIN are exported so a
@@ -61,50 +73,70 @@ type App struct {
 	cancels []func()
 }
 
-// New assembles and starts the system. The workers subscribe to the bus before
-// New returns, so the async plane is live once it does; Close stops them.
+// New assembles and starts the system. In single-process mode the workers
+// subscribe to the bus before New returns, so the async plane is live once it
+// does; Close stops them. In split-process mode (durable backends supplied) the
+// workers run elsewhere and New wires only the decision service.
 func New(cfg Config) (*App, error) {
 	now := cfg.Now
 	if now == nil {
 		now = func() int64 { return time.Now().Unix() }
 	}
 
-	tokens := memory.NewTokenStore()
-	policies := memory.NewPolicyStore()
-	fstore := memory.NewFeatureStore()
-	b := busmem.New(cfg.BusRetries)
+	// Split the process on whether durable backends were supplied. All four must
+	// come together — a decision host reading Redis but publishing to an in-memory
+	// bus no worker consumes would silently drop every outcome.
+	external := cfg.Tokens != nil && cfg.Policies != nil && cfg.Features != nil && cfg.Bus != nil
+
+	var (
+		tokens   store.TokenStore
+		policies store.PolicyStore
+		fstore   store.FeatureStore
+		b        bus.Bus
+	)
+	if external {
+		tokens, policies, fstore, b = cfg.Tokens, cfg.Policies, cfg.Features, cfg.Bus
+	} else {
+		tokens = memory.NewTokenStore()
+		policies = memory.NewPolicyStore()
+		fstore = memory.NewFeatureStore()
+		b = busmem.New(cfg.BusRetries)
+	}
 	ledger := chain.New()
 
-	// The materialiser is the single writer to the feature store; every other
-	// producer deposits through it. The reputation-builder is one such producer,
-	// so it takes the materialiser as its Depositor.
-	mat := materialise.New(tokens, fstore, now)
-	rep := reputation.New(mat, reputation.DefaultParams(), now)
-	strm := stream.New(tokens)
-
 	a := &App{
-		Tokens:       tokens,
-		Policies:     policies,
-		Features:     fstore,
-		Bus:          b,
-		Chain:        ledger,
-		Stream:       strm,
-		Materialiser: mat,
-		Reputation:   rep,
+		Tokens:   tokens,
+		Policies: policies,
+		Features: fstore,
+		Bus:      b,
+		Chain:    ledger,
 	}
 
-	// Subscribe every worker, collecting cancels so Close can stop them. A failed
-	// registration tears down what was already wired.
-	for _, register := range []func(bus.Bus) (func(), error){
-		strm.Register, mat.Register, rep.Register,
-	} {
-		cancel, err := register(b)
-		if err != nil {
-			a.stopWorkers()
-			_ = b.Close()
-			return nil, err
+	// Run the workers in-process only in single-process mode. When durable
+	// backends are supplied, cmd/worker owns them; registering here would fold
+	// every event twice.
+	if !external {
+		// The materialiser is the single writer to the feature store; every other
+		// producer deposits through it. The reputation-builder is one such producer,
+		// so it takes the materialiser as its Depositor.
+		mat := materialise.New(tokens, fstore, now)
+		rep := reputation.New(mat, reputation.DefaultParams(), now)
+		strm := stream.New(tokens)
+		a.Stream, a.Materialiser, a.Reputation = strm, mat, rep
+
+		// Subscribe every worker, collecting cancels so Close can stop them. A failed
+		// registration tears down what was already wired.
+		for _, register := range []func(bus.Bus) (func(), error){
+			strm.Register, mat.Register, rep.Register,
+		} {
+			cancel, err := register(b)
+			if err != nil {
+				a.stopWorkers()
+				_ = b.Close()
+				return nil, err
+			}
+			a.cancels = append(a.cancels, cancel)
 		}
-		a.cancels = append(a.cancels, cancel)
 	}
 
 	a.Decision = decision.New(decision.Config{

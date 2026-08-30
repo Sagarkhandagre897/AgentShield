@@ -1,8 +1,13 @@
 // Command decision is the AgentShield entrypoint: it serves the synchronous
-// plane's gRPC Evaluate in front of the in-process composition root, which wires
-// the three hot stores, the bus, the CHAIN and the three off-clock workers into
-// one running system. Evaluate answers before money moves; the async plane folds
-// outcomes back into the shared state behind it.
+// plane's gRPC Evaluate in front of the composition root, which wires the three
+// hot stores, the bus and the CHAIN behind it. Evaluate answers before money
+// moves; the async plane folds outcomes back into the shared state behind it.
+//
+// It runs in one of two modes. With REDIS_ADDR and KAFKA_SEEDS set it is the
+// split-process decision host: it reads Redis and publishes decision.made to
+// Redpanda, and the workers run separately in cmd/worker. With neither set it
+// falls back to the in-memory single-process root — stores, bus and the three
+// workers all in this process — so the service is runnable locally with no infra.
 //
 // Transport is mutual TLS when AGENTSHIELD_TLS_CERT / _KEY / _CA are set — the
 // caller identity P5 verifies comes from the client certificate. With no certs
@@ -18,13 +23,16 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	pb "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1"
 	"github.com/Sagarkhandagre897/AgentShield/internal/app"
+	kafkabus "github.com/Sagarkhandagre897/AgentShield/internal/bus/kafka"
 	"github.com/Sagarkhandagre897/AgentShield/internal/decision"
+	redisstore "github.com/Sagarkhandagre897/AgentShield/internal/store/redis"
 )
 
 func env(key, def string) string {
@@ -65,6 +73,34 @@ func serverTLS() (credentials.TransportCredentials, error) {
 	}), nil
 }
 
+// backends selects the durable backends from the environment. When REDIS_ADDR
+// and KAFKA_SEEDS are both set it dials Redis and Redpanda and returns them for
+// the split-process decision host; otherwise it returns a zero Config so app.New
+// falls back to the in-memory single-process root. The bool reports split mode.
+func backends(ctx context.Context) (app.Config, bool, error) {
+	redisAddr := os.Getenv("REDIS_ADDR")
+	seedsEnv := os.Getenv("KAFKA_SEEDS")
+	if redisAddr == "" || seedsEnv == "" {
+		return app.Config{}, false, nil
+	}
+
+	rc, err := redisstore.Dial(ctx, redisAddr)
+	if err != nil {
+		return app.Config{}, false, fmt.Errorf("redis: %w", err)
+	}
+	b, err := kafkabus.New(ctx, strings.Split(seedsEnv, ","), 3)
+	if err != nil {
+		_ = rc.Close()
+		return app.Config{}, false, fmt.Errorf("kafka: %w", err)
+	}
+	return app.Config{
+		Tokens:   redisstore.NewTokenStore(rc),
+		Policies: redisstore.NewPolicyStore(rc),
+		Features: redisstore.NewFeatureStore(rc),
+		Bus:      b,
+	}, true, nil
+}
+
 func main() {
 	addr := env("AGENTSHIELD_ADDR", ":8443")
 
@@ -87,15 +123,25 @@ func main() {
 		log.Printf("agentshield: WARNING starting WITHOUT mTLS (dev mode); caller identity = %q", devID)
 	}
 
-	// The whole in-process system: the decision service in front, and the bus,
-	// CHAIN and three off-clock workers behind it, all sharing one set of stores.
-	// In-memory adapters keep it runnable without Kafka/Redis/PostgreSQL; each
-	// lands behind the same interfaces.
-	system, err := app.New(app.Config{Identify: identify})
+	// Pick the backends from the environment: Redis + Redpanda (split-process, the
+	// workers run in cmd/worker) or in-memory (single-process, workers in here).
+	cfg, split, err := backends(context.Background())
+	if err != nil {
+		log.Fatalf("agentshield: backend setup failed: %v", err)
+	}
+	cfg.Identify = identify
+
+	system, err := app.New(cfg)
 	if err != nil {
 		log.Fatalf("agentshield: wiring failed: %v", err)
 	}
 	defer system.Close()
+
+	if split {
+		log.Printf("agentshield: split-process mode — Redis stores + Redpanda bus (workers run in cmd/worker)")
+	} else {
+		log.Printf("agentshield: single-process mode — in-memory stores, bus and workers")
+	}
 
 	grpcServer := grpc.NewServer(opts...)
 	pb.RegisterDecisionServer(grpcServer, system.Decision)
@@ -104,7 +150,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("agentshield: listen %s: %v", addr, err)
 	}
-	log.Printf("agentshield: listening on %s (decision service + async plane, in-process)", addr)
+	log.Printf("agentshield: listening on %s", addr)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("agentshield: serve: %v", err)
 	}
