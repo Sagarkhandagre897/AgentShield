@@ -29,6 +29,16 @@ const (
 	EventPaymentDisputed = "payment.disputed" // chargeback/dispute — the strongest settled negative, arrives on settlement lag
 	EventTokenConfirmed  = "token.confirmed"
 	EventTokenCancelled  = "token.cancelled"
+
+	// Feature-deposit events — the up meeting point for the off-clock ML engines
+	// (§8, §10). An engine computes its one calibrated figure off the clock and
+	// publishes it here; the feature-materialiser (the single writer) consumes it
+	// and merges the field into the keyed row. This is §10 verbatim: "new engines
+	// add columns to the feature row and types to the event envelope — not new
+	// objects on the hot path." The engine never writes the store itself.
+	EventFeatureBehaviour = "feature.behaviour.deposited" // behaviour engine  → behaviour_deviation (§11)
+	EventFeatureIntent    = "feature.intent.deposited"    // intent engine     → intent_divergence  (§12)
+	EventFeatureNetwork   = "feature.network.deposited"   // graph engine      → network_risk       (§13)
 )
 
 // Payload keys carried in Event.Payload. In-process the values keep their
@@ -40,6 +50,16 @@ const (
 	PayloadDecision    = "decision"     // string, one of the Decision* values
 	PayloadCustomerID  = "customer_id"  // string
 	PayloadAgentID     = "agent_id"     // string; who a settled outcome is attributed to (reputation)
+
+	// Feature-deposit payload keys. A deposit is keyed by the entity the figure
+	// belongs to (a customer / token / agent / merchant / node id), carried in
+	// feature_key — never in token_id, which is the partition key for money and
+	// mandate events. The figure itself and its computed_at travel alongside.
+	PayloadFeatureKey       = "feature_key"       // string; the entity id the figure lands on
+	PayloadDeviation        = "deviation"         // float64; behaviour_deviation
+	PayloadDivergence       = "divergence"        // float64; intent_divergence
+	PayloadRisk             = "risk"              // float64; network_risk
+	PayloadSignalDeviations = "signal_deviations" // []domain.SignalDeviation; per-signal breakdown (behaviour)
 )
 
 // Decision payload values mirror the verdict answers as plain strings, so the
@@ -122,6 +142,45 @@ func WithAgent(ev domain.Event, agentID string) domain.Event {
 	return ev
 }
 
+// FeatureBehaviourDepositEvent carries a behaviour engine's calibrated deviation
+// (and its per-signal breakdown) toward the materialiser. featureKey is the
+// entity the figure lands on (an agent / customer id); occurredAt is the figure's
+// computed_at. event_id must be stable for the (key, computation) so redelivery
+// folds once. tokenID may be "" for a non-token entity; it is only a partition
+// hint here, not the deposit key.
+func FeatureBehaviourDepositEvent(eventID, tokenID, featureKey string, occurredAt int64, deviation float64, signals []domain.SignalDeviation) domain.Event {
+	return domain.Event{
+		EventID: eventID, Type: EventFeatureBehaviour, TokenID: tokenID,
+		OccurredAt: occurredAt, Source: "behaviour-engine",
+		Payload: map[string]any{
+			PayloadFeatureKey:       featureKey,
+			PayloadDeviation:        deviation,
+			PayloadSignalDeviations: signals,
+		},
+	}
+}
+
+// FeatureIntentDepositEvent carries the intent engine's divergence figure toward
+// the materialiser, keyed by featureKey (a token / session-scoped entity id).
+func FeatureIntentDepositEvent(eventID, tokenID, featureKey string, occurredAt int64, divergence float64) domain.Event {
+	return domain.Event{
+		EventID: eventID, Type: EventFeatureIntent, TokenID: tokenID,
+		OccurredAt: occurredAt, Source: "intent-engine",
+		Payload: map[string]any{PayloadFeatureKey: featureKey, PayloadDivergence: divergence},
+	}
+}
+
+// FeatureNetworkDepositEvent carries the graph engine's network-risk figure toward
+// the materialiser, keyed by featureKey (a node id — a stable identifier, never a
+// reassignable handle, §13).
+func FeatureNetworkDepositEvent(eventID, tokenID, featureKey string, occurredAt int64, risk float64) domain.Event {
+	return domain.Event{
+		EventID: eventID, Type: EventFeatureNetwork, TokenID: tokenID,
+		OccurredAt: occurredAt, Source: "graph-engine",
+		Payload: map[string]any{PayloadFeatureKey: featureKey, PayloadRisk: risk},
+	}
+}
+
 // PayloadInt64 reads an integer payload value, normalising the int64 / int /
 // float64 / json.Number forms a broker may deliver. The second result is false
 // when the key is absent or not a number.
@@ -146,6 +205,50 @@ func PayloadInt64(ev domain.Event, key string) (int64, bool) {
 func PayloadString(ev domain.Event, key string) (string, bool) {
 	s, ok := ev.Payload[key].(string)
 	return s, ok
+}
+
+// PayloadFloat64 reads a floating-point payload value, normalising the float64 /
+// float32 / int / int64 / json.Number forms a broker may deliver. The second
+// result is false when the key is absent or not a number.
+func PayloadFloat64(ev domain.Event, key string) (float64, bool) {
+	switch v := ev.Payload[key].(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+// PayloadSignals reads the per-signal deviation breakdown. In-process the value
+// keeps its Go type; a JSON broker delivers it as []any of maps, which this
+// re-marshals through the SignalDeviation shape. A missing or malformed value
+// yields nil — the row simply carries no breakdown.
+func PayloadSignals(ev domain.Event) []domain.SignalDeviation {
+	raw, ok := ev.Payload[PayloadSignalDeviations]
+	if !ok || raw == nil {
+		return nil
+	}
+	if s, ok := raw.([]domain.SignalDeviation); ok {
+		return s
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var out []domain.SignalDeviation
+	if json.Unmarshal(b, &out) != nil {
+		return nil
+	}
+	return out
 }
 
 // Handler processes one delivered event. Returning a non-nil error asks the bus

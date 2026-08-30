@@ -183,6 +183,112 @@ func TestIdempotentHandle(t *testing.T) {
 	}
 }
 
+// TestDepositEventsRoute is the up-meeting-point contract: an off-clock engine's
+// feature.*.deposited event, handed to Handle, lands its one figure on the keyed
+// row with computed_at = the event's occurred_at (the moment the engine judged,
+// not the moment we folded).
+func TestDepositEventsRoute(t *testing.T) {
+	fs := memory.NewFeatureStore()
+	m := materialise.New(memory.NewTokenStore(), fs, func() int64 { return fixedAt })
+	ctx := context.Background()
+
+	sigs := []domain.SignalDeviation{{Signal: "velocity", Deviation: 0.7, ObsCount: 42}}
+	if err := m.Handle(ctx, bus.FeatureBehaviourDepositEvent("b1", tok, agent, 111, 0.4, sigs)); err != nil {
+		t.Fatalf("behaviour deposit: %v", err)
+	}
+	if err := m.Handle(ctx, bus.FeatureIntentDepositEvent("i1", tok, agent, 222, 0.6)); err != nil {
+		t.Fatalf("intent deposit: %v", err)
+	}
+	if err := m.Handle(ctx, bus.FeatureNetworkDepositEvent("n1", tok, agent, 333, 0.8)); err != nil {
+		t.Fatalf("network deposit: %v", err)
+	}
+
+	r, ok := rowOf(t, fs, agent)
+	if !ok {
+		t.Fatal("agent row must exist after deposits")
+	}
+	if r.BehaviourDeviation != 0.4 {
+		t.Fatalf("behaviour_deviation = %v, want 0.4", r.BehaviourDeviation)
+	}
+	if len(r.SignalDeviations) != 1 || r.SignalDeviations[0].Signal != "velocity" {
+		t.Fatalf("signal breakdown not deposited: %v", r.SignalDeviations)
+	}
+	if r.IntentDivergence != 0.6 {
+		t.Fatalf("intent_divergence = %v, want 0.6", r.IntentDivergence)
+	}
+	if r.NetworkRisk != 0.8 {
+		t.Fatalf("network_risk = %v, want 0.8", r.NetworkRisk)
+	}
+	if r.ComputedAt != 333 { // latest-write-wins across the three deposits
+		t.Fatalf("computed_at = %d, want 333 (latest occurred_at)", r.ComputedAt)
+	}
+}
+
+// TestDepositEventFromJSONBroker proves the cross-language path: a JSON broker
+// (Redpanda carrying a Python engine's deposit) decodes numbers as float64 and
+// the signal breakdown as []any of maps, not the native Go types. The payload
+// readers must normalise both so the figure still lands. event_id must dedupe.
+func TestDepositEventFromJSONBroker(t *testing.T) {
+	fs := &countingFeatures{FeatureStore: memory.NewFeatureStore()}
+	m := materialise.New(memory.NewTokenStore(), fs, func() int64 { return fixedAt })
+	ctx := context.Background()
+
+	// Shaped exactly as encoding/json would decode a Python-published deposit.
+	ev := domain.Event{
+		EventID:    "dep-json-1",
+		Type:       bus.EventFeatureBehaviour,
+		TokenID:    tok,
+		OccurredAt: 444,
+		Source:     "behaviour-engine",
+		Payload: map[string]any{
+			bus.PayloadFeatureKey: agent,
+			bus.PayloadDeviation:  float64(0.55), // JSON numbers arrive as float64
+			bus.PayloadSignalDeviations: []any{
+				map[string]any{"signal": "amount_z", "deviation": float64(0.9), "obs_count": float64(17)},
+			},
+		},
+	}
+	if err := m.Handle(ctx, ev); err != nil {
+		t.Fatalf("json deposit: %v", err)
+	}
+	if err := m.Handle(ctx, ev); err != nil { // at-least-once redelivery
+		t.Fatalf("json deposit redelivery: %v", err)
+	}
+
+	r, ok := rowOf(t, fs, agent)
+	if !ok {
+		t.Fatal("agent row must exist after a JSON-shaped deposit")
+	}
+	if r.BehaviourDeviation != 0.55 {
+		t.Fatalf("behaviour_deviation = %v, want 0.55", r.BehaviourDeviation)
+	}
+	if len(r.SignalDeviations) != 1 || r.SignalDeviations[0].Signal != "amount_z" || r.SignalDeviations[0].ObsCount != 17 {
+		t.Fatalf("signal breakdown not re-marshalled from JSON: %v", r.SignalDeviations)
+	}
+	if r.ComputedAt != 444 {
+		t.Fatalf("computed_at = %d, want 444", r.ComputedAt)
+	}
+	if n := atomic.LoadInt32(&fs.puts); n != 1 {
+		t.Fatalf("redelivery of a deposit must not re-write: puts = %d, want 1", n)
+	}
+}
+
+// TestDepositEventMissingKeyIsNoop guards the boundary: a deposit with no
+// feature_key has nowhere to land and must be dropped, not written to an empty
+// key.
+func TestDepositEventMissingKeyIsNoop(t *testing.T) {
+	fs := &countingFeatures{FeatureStore: memory.NewFeatureStore()}
+	m := materialise.New(memory.NewTokenStore(), fs, func() int64 { return fixedAt })
+
+	ev := bus.FeatureIntentDepositEvent("i-nokey", tok, "", 100, 0.5)
+	if err := m.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if n := atomic.LoadInt32(&fs.puts); n != 0 {
+		t.Fatalf("a keyless deposit must not write: puts = %d, want 0", n)
+	}
+}
+
 func TestThroughBus(t *testing.T) {
 	ts := memory.NewTokenStore()
 	fs := memory.NewFeatureStore()

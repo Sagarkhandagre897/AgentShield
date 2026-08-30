@@ -66,16 +66,15 @@ func (m *Materialiser) Register(b bus.Bus) (func(), error) {
 	return b.Subscribe(Group, m.Handle)
 }
 
-// Handle is the bus.Handler. It recomputes consumption_frac when money moves;
-// other event types are no-ops here (the learned figures arrive through the
-// Deposit methods). It is idempotent on event_id and marks an event handled only
-// after the write commits, so redelivery re-applies safely.
+// Handle is the bus.Handler. It has two jobs: recompute consumption_frac when
+// money moves (a capture it derives itself), and fold the calibrated figures the
+// off-clock ML engines publish (feature.*.deposited) into the keyed row through
+// the typed Deposit methods — the engines never write the store, only publish.
+// Every other event type is a no-op. It is idempotent on event_id and marks an
+// event handled only after the write commits, so redelivery re-applies safely.
 func (m *Materialiser) Handle(ctx context.Context, ev domain.Event) error {
-	if ev.Type != bus.EventPaymentCaptured {
-		return nil // only a capture changes consumption; nothing else to materialise here
-	}
-	if ev.EventID == "" || ev.TokenID == "" {
-		return nil
+	if ev.EventID == "" {
+		return nil // nothing to dedupe on
 	}
 
 	m.mu.Lock()
@@ -85,7 +84,23 @@ func (m *Materialiser) Handle(ctx context.Context, ev domain.Event) error {
 		return nil
 	}
 
-	if err := m.refreshConsumption(ctx, ev.TokenID); err != nil {
+	var err error
+	switch ev.Type {
+	case bus.EventPaymentCaptured:
+		if ev.TokenID == "" {
+			return nil
+		}
+		err = m.refreshConsumption(ctx, ev.TokenID)
+	case bus.EventFeatureBehaviour:
+		err = m.applyBehaviour(ctx, ev)
+	case bus.EventFeatureIntent:
+		err = m.applyIntent(ctx, ev)
+	case bus.EventFeatureNetwork:
+		err = m.applyNetwork(ctx, ev)
+	default:
+		return nil // not the materialiser's business
+	}
+	if err != nil {
 		return err // leave unmarked so the bus redelivers
 	}
 
@@ -93,6 +108,38 @@ func (m *Materialiser) Handle(ctx context.Context, ev domain.Event) error {
 	m.seen[ev.EventID] = struct{}{}
 	m.mu.Unlock()
 	return nil
+}
+
+// applyBehaviour folds a behaviour engine's deposit event into the keyed row. The
+// figure's computed_at is the event's occurred_at — the moment the engine judged
+// it, not the moment the materialiser folded it.
+func (m *Materialiser) applyBehaviour(ctx context.Context, ev domain.Event) error {
+	key, ok := bus.PayloadString(ev, bus.PayloadFeatureKey)
+	if !ok || key == "" {
+		return nil
+	}
+	deviation, _ := bus.PayloadFloat64(ev, bus.PayloadDeviation)
+	return m.DepositBehaviour(ctx, key, deviation, bus.PayloadSignals(ev), ev.OccurredAt)
+}
+
+// applyIntent folds an intent engine's deposit event into the keyed row.
+func (m *Materialiser) applyIntent(ctx context.Context, ev domain.Event) error {
+	key, ok := bus.PayloadString(ev, bus.PayloadFeatureKey)
+	if !ok || key == "" {
+		return nil
+	}
+	divergence, _ := bus.PayloadFloat64(ev, bus.PayloadDivergence)
+	return m.DepositIntent(ctx, key, divergence, ev.OccurredAt)
+}
+
+// applyNetwork folds a graph engine's deposit event into the keyed row.
+func (m *Materialiser) applyNetwork(ctx context.Context, ev domain.Event) error {
+	key, ok := bus.PayloadString(ev, bus.PayloadFeatureKey)
+	if !ok || key == "" {
+		return nil
+	}
+	risk, _ := bus.PayloadFloat64(ev, bus.PayloadRisk)
+	return m.DepositNetwork(ctx, key, risk, ev.OccurredAt)
 }
 
 // refreshConsumption recomputes consumption_frac for a token from its lifetime
