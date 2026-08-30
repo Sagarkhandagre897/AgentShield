@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentshield-behaviour"
+version = "0.1.0"
+description = "AgentShield behaviour engine (System Design §11) — streaming baselines, a calibrated GBDT scorer and an isolation-forest floor that deposit one behaviour_deviation figure off the clock."
+requires-python = ">=3.10"
+# Layer 1 (streaming baselines) is pure stdlib and always importable. Layers 2-3
+# pull the ML stack; they are imported lazily so the baselines and their tests run
+# without the heavy wheels installed (mirrors agentshield_shared.bus).
+dependencies = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["agentshield_behaviour*"]
