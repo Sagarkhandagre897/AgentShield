@@ -1,0 +1,22 @@
+[project]
+name = "agentshield-generator"
+version = "0.1.0"
+description = "AgentShield synthetic scenario generator (Phase 7) — legit sessions + labelled misuse (intent drift, scope overrun, velocity bust-out, replay, stale/revoked token) + graph structures (mule fan-in, shared-device ring, synchronised fleet). Ground-truth labels are grounded only in settled outcomes."
+requires-python = ">=3.10"
+# Pure stdlib on purpose. The generator synthesises a self-contained Scenario —
+# mandates, sealed envelopes (with the raw PII bound for the VAULT), debit
+# OrderContexts and settled-outcome recipes — as plain data. It talks to nothing:
+# no broker, no gRPC, no clock. The live driver (Phase 7 component 2) is what
+# replays a Scenario against the real decision service and bus. No wheels needed,
+# so it runs anywhere the interpreter does.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agentshield_generator"]
