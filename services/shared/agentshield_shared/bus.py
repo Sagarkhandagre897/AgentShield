@@ -93,10 +93,41 @@ def build_network_event(feature_key: str, risk: float, occurred_at: int, token_i
     )
 
 
+def build_envelope_sealed_event(
+    token_id: str,
+    session_id: str,
+    occurred_at: int,
+    raw_instruction: str = "",
+    contact: str = "",
+) -> Event:
+    """Construct an envelope.sealed event — the one PII-bearing message on the bus
+    (mirror bus.EnvelopeSealedEvent). session_id is the VAULT key (in the payload);
+    token_id is the partition key AND is required — the Go stream-processor drops an
+    event with an empty token_id, so a seal with none would silently never land.
+    raw_instruction and contact are the plaintext the stream-processor seals field-by-
+    field into the encrypted VAULT; an empty field is simply not sealed. The event_id
+    is stable for a (session, instant) so an at-least-once redelivery folds once."""
+    return Event(
+        event_id=_deposit_id(schema.EVENT_ENVELOPE_SEALED, session_id, occurred_at),
+        type=schema.EVENT_ENVELOPE_SEALED,
+        token_id=token_id,
+        occurred_at=occurred_at,
+        source="intent-engine",
+        payload={
+            schema.PAYLOAD_SESSION_ID: session_id,
+            schema.PAYLOAD_RAW_INSTRUCTION: raw_instruction,
+            schema.PAYLOAD_CONTACT: contact,
+        },
+    )
+
+
 class DepositPublisher:
-    """Publishes an engine's calibrated figures to features.v1. The record key is
-    token_id when set, else the feature_key, so an entity's deposits keep their
-    order on one partition."""
+    """The off-clock producer client. Its main job is publishing an engine's
+    calibrated figures to features.v1 (the up meeting point, merged by the Go
+    feature-materialiser — the single writer). It also carries the one PII-bearing
+    event, envelope.sealed, to vault.v1, so a producer or the demo generator can seed
+    the encrypted VAULT through the same client. The record key is token_id when set,
+    else the feature_key, so an entity's messages keep their order on one partition."""
 
     def __init__(self, seeds: str):
         _require_kafka()
@@ -124,6 +155,19 @@ class DepositPublisher:
 
     def deposit_network(self, feature_key: str, risk: float, occurred_at: int, token_id: str = "") -> None:
         self._publish(build_network_event(feature_key, risk, occurred_at, token_id))
+
+    def seal_envelope(
+        self,
+        token_id: str,
+        session_id: str,
+        occurred_at: int,
+        raw_instruction: str = "",
+        contact: str = "",
+    ) -> None:
+        """Publish an envelope.sealed event to vault.v1 so the Go stream-processor
+        seals the session's raw PII into the encrypted VAULT. token_id is required
+        (the processor drops events with none)."""
+        self._publish(build_envelope_sealed_event(token_id, session_id, occurred_at, raw_instruction, contact))
 
     def flush(self, timeout: float = 10.0) -> int:
         """Block until queued deposits are acknowledged; returns messages still

@@ -214,5 +214,28 @@ func TestAADBindsCiphertextToSession(t *testing.T) {
 	}
 }
 
+// TestSinkSealsThroughWireFields exercises the stream-facing seam the stream-processor
+// actually holds: Sink.Seal takes the wire field name (equal to the Field constants,
+// e.g. bus.PayloadRawInstruction == string(FieldInstruction)) and lands an encrypted,
+// revealable row. An empty field is skipped, so an absent contact writes no row.
+func TestSinkSealsThroughWireFields(t *testing.T) {
+	ctx := context.Background()
+	v := newVault(t)
+	s := NewSink(v)
 
+	if err := s.Seal(ctx, "sess1", string(FieldInstruction), "refund order 42"); err != nil {
+		t.Fatalf("sink seal instruction: %v", err)
+	}
+	if err := s.Seal(ctx, "sess1", string(FieldContact), ""); err != nil {
+		t.Fatalf("sink seal empty contact: %v", err)
+	}
+
+	if got, _ := v.Reveal(ctx, "sess1", FieldInstruction); got != "refund order 42" {
+		t.Fatalf("instruction sealed via the sink = %q", got)
+	}
+	// The empty contact must not have written a row.
+	if _, err := v.Reveal(ctx, "sess1", FieldContact); err != ErrNotFound {
+		t.Fatalf("empty field must write no row: err = %v, want ErrNotFound", err)
+	}
+}
 

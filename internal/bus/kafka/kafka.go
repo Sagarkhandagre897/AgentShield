@@ -25,20 +25,23 @@ import (
 	"github.com/Sagarkhandagre897/AgentShield/internal/domain"
 )
 
-// Topic names — the four live topics plus outcomes.v1, reserved for the learning
-// loop's settled-outcome labels. token_id keys every one of them.
+// Topic names — the live analytic topics, outcomes.v1 for the learning loop's
+// settled-outcome labels, and vault.v1 for the one PII-bearing channel. token_id
+// keys every one of them (envelope.sealed keys on the mandate the session runs
+// under, with the session_id in the payload).
 const (
 	TopicEvaluations = "evaluations.v1"
 	TopicPayments    = "payments.v1"
 	TopicTokens      = "tokens.v1"
 	TopicFeatures    = "features.v1"
 	TopicOutcomes    = "outcomes.v1"
+	TopicVault       = "vault.v1"
 )
 
 // allTopics is what every consumer group subscribes to: a group sees every event
 // and its handler no-ops on the types it does not care about (§ the handlers'
 // default branch). It is also the bootstrap set the deploy init creates.
-var allTopics = []string{TopicEvaluations, TopicPayments, TopicTokens, TopicFeatures, TopicOutcomes}
+var allTopics = []string{TopicEvaluations, TopicPayments, TopicTokens, TopicFeatures, TopicOutcomes, TopicVault}
 
 // topicFor maps an event Type to its topic. An unknown type has no home and is
 // rejected on Publish rather than silently dropped.
@@ -54,6 +57,8 @@ func topicFor(eventType string) (string, bool) {
 		return TopicFeatures, true
 	case bus.EventOutcomeLabeled:
 		return TopicOutcomes, true
+	case bus.EventEnvelopeSealed:
+		return TopicVault, true
 	default:
 		return "", false
 	}

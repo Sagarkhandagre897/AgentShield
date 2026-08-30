@@ -270,8 +270,27 @@ func (v *Vault) Erase(ctx context.Context, sessionID string) (int, error) {
 	return int(tag.RowsAffected()), nil
 }
 
+// Sink adapts a Vault to the stream-processor's VAULT-writer seam: a plain-string
+// Seal the stream package can depend on without importing this package's Field
+// type. It is the VAULT counterpart of chain's Emit sink, with one deliberate
+// difference — Seal RETURNS its error rather than reporting out of band, because
+// sealing the PII is the whole purpose of the fold it runs in: a transient failure
+// must redeliver so the raw text is never lost, not logged-and-dropped like the
+// CHAIN append that rides alongside a block-state fold.
+type Sink struct{ v *Vault }
 
+// NewSink wraps a Vault as a stream VAULT sink.
+func NewSink(v *Vault) *Sink { return &Sink{v: v} }
 
+// Seal encrypts one field of a session's PII, converting the wire field name to a
+// vault.Field. An empty plaintext is skipped (a session may seal an instruction
+// with no contact on file), so an absent field never writes an empty row.
+func (s *Sink) Seal(ctx context.Context, sessionID, field, plaintext string) error {
+	if plaintext == "" {
+		return nil
+	}
+	return s.v.Seal(ctx, sessionID, Field(field), plaintext)
+}
 
 
 

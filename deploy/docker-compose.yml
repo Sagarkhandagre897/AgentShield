@@ -34,9 +34,11 @@ services:
       timeout: 5s
       retries: 12
 
-  # One-shot: create the four live topics plus outcomes.v1 (reserved for the
-  # learning loop). token_id keys every one, so partitions preserve per-token
-  # order. Idempotent — re-running compose leaves existing topics untouched.
+  # One-shot: create the four live topics, outcomes.v1 (the learning loop's settled
+  # labels) and vault.v1 (the one PII-bearing channel — raw instruction text/contact
+  # bound for the encrypted VAULT, kept off the analytic topics). token_id keys every
+  # one, so partitions preserve per-token order. Idempotent — re-running compose
+  # leaves existing topics untouched.
   topic-init:
     image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
     container_name: agentshield-topic-init
@@ -47,7 +49,7 @@ services:
     command:
       - >
         rpk topic create
-        evaluations.v1 payments.v1 tokens.v1 features.v1 outcomes.v1
+        evaluations.v1 payments.v1 tokens.v1 features.v1 outcomes.v1 vault.v1
         --brokers redpanda:9092 --partitions 3 --replicas 1
         || true
     restart: "no"
@@ -66,11 +68,11 @@ services:
       timeout: 3s
       retries: 12
 
-  # The durable provenance CHAIN (and, later, the encrypted VAULT). The decision
-  # host writes the append-only, hash-linked ledger here after the reply when
-  # POSTGRES_DSN is set:
+  # The durable provenance CHAIN and the encrypted VAULT. The stream-processor writes
+  # the append-only, hash-linked ledger and seals session PII here when POSTGRES_DSN
+  # is set (single-process: cmd/decision opens it; split-process: cmd/worker does):
   #   POSTGRES_DSN=postgres://agentshield:agentshield@localhost:5432/agentshield?sslmode=disable go run ./cmd/decision
-  # The schema is created on first Open, so no init script is needed.
+  # Both schemas are created on first Open, so no init script is needed.
   postgres:
     image: postgres:16-alpine
     container_name: agentshield-postgres

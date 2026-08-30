@@ -63,6 +63,22 @@ def test_intent_and_network_deposit_shape():
     assert nw.payload == {schema.PAYLOAD_FEATURE_KEY: "node_1", schema.PAYLOAD_RISK: 0.8}
 
 
+def test_envelope_sealed_shape():
+    ev = bus.build_envelope_sealed_event("tok_1", "sess_1", 555, "please refund order 42", "alice@example.com")
+    # The one PII-bearing event: its own topic, keyed by the mandate (token_id).
+    assert ev.type == schema.EVENT_ENVELOPE_SEALED
+    assert ev.source == "intent-engine"
+    assert schema.topic_for(ev.type) == schema.TOPIC_VAULT
+    assert ev.token_id == "tok_1"  # partition key; the processor drops an empty one
+    assert ev.payload[schema.PAYLOAD_SESSION_ID] == "sess_1"  # the VAULT key
+    assert ev.payload[schema.PAYLOAD_RAW_INSTRUCTION] == "please refund order 42"
+    assert ev.payload[schema.PAYLOAD_CONTACT] == "alice@example.com"
+    # Stable id: the same (session, instant) folds once on redelivery.
+    assert ev.event_id == bus.build_envelope_sealed_event("tok_1", "sess_1", 555).event_id
+    # Round-trips to the exact keys the Go stream-processor reads.
+    assert schema.Event.from_json(ev.to_json()) == ev
+
+
 def test_hmac_sign_verify():
     msg = b'{"event_id":"e1"}'
     sig = hmac_util.sign("secret", msg)

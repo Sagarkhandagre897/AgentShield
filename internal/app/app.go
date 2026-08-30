@@ -63,6 +63,15 @@ type Config struct {
 	// is ignored. The write itself always belongs to the stream-processor — the
 	// decision service never touches the ledger (per the architecture diagram).
 	Sink stream.ProvenanceSink
+
+	// Vault, if non-nil, is the encrypted VAULT the stream-processor seals session
+	// PII into in single-process mode (from envelope.sealed events). Like Sink it is
+	// supplied by cmd/decision from the durable PostgreSQL store when POSTGRES_DSN is
+	// set and no split backends are; in split-process mode cmd/worker owns it. Left
+	// nil, sealing events are ignored — there is no PII store to write and nothing on
+	// the clock reads it. The write belongs to the stream-processor (architecture
+	// diagram), never the decision service.
+	Vault stream.VaultSink
 }
 
 // App is the wired in-process system. The stores, bus and CHAIN are exported so a
@@ -123,6 +132,11 @@ func New(cfg Config) (*App, error) {
 		chainSink = cfg.Sink
 	}
 
+	// The VAULT's single writer is likewise the stream-processor: it seals the raw
+	// PII from envelope.sealed events. There is no in-memory default (the VAULT is
+	// durable/encrypted by nature) — absent cfg.Vault, sealing events are ignored.
+	vaultSink := cfg.Vault
+
 	a := &App{
 		Tokens:   tokens,
 		Policies: policies,
@@ -141,7 +155,7 @@ func New(cfg Config) (*App, error) {
 		// block-state and, as the CHAIN's single writer, appends provenance too.
 		mat := materialise.New(tokens, fstore, now)
 		rep := reputation.New(mat, reputation.DefaultParams(), now)
-		strm := stream.New(tokens, chainSink)
+		strm := stream.New(tokens, chainSink, vaultSink)
 		a.Stream, a.Materialiser, a.Reputation = strm, mat, rep
 
 		// Subscribe every worker, collecting cancels so Close can stop them. A failed

@@ -23,6 +23,10 @@ EVENT_PAYMENT_FAILED = "payment.failed"
 EVENT_PAYMENT_DISPUTED = "payment.disputed"
 EVENT_TOKEN_CONFIRMED = "token.confirmed"
 EVENT_TOKEN_CANCELLED = "token.cancelled"
+# The one PII-bearing event: a session's raw instruction text and contact, bound
+# for the encrypted VAULT via its own topic (vault.v1). Only the Go stream-processor
+# (the single VAULT writer) consumes it.
+EVENT_ENVELOPE_SEALED = "envelope.sealed"
 EVENT_FEATURE_BEHAVIOUR = "feature.behaviour.deposited"
 EVENT_FEATURE_INTENT = "feature.intent.deposited"
 EVENT_FEATURE_NETWORK = "feature.network.deposited"
@@ -42,6 +46,13 @@ PAYLOAD_SIGNAL_DEVIATIONS = "signal_deviations"
 PAYLOAD_LABEL = "label"
 PAYLOAD_WEIGHT = "weight"
 PAYLOAD_REASON = "reason"
+# Envelope-sealing payload keys. session_id is the VAULT key (the store is keyed by
+# session, not token); the two field values are the plaintext the Go stream-processor
+# seals, each under its vault.Field. Both field values are optional; session_id keys
+# the row and token_id (the envelope) must be set or the stream-processor drops it.
+PAYLOAD_SESSION_ID = "session_id"
+PAYLOAD_RAW_INSTRUCTION = "raw_instruction_text"
+PAYLOAD_CONTACT = "contact"
 
 # --- Label values and reasons (mirror internal/bus/bus.go) -----------------
 LABEL_MISUSE = 1.0
@@ -56,6 +67,7 @@ TOPIC_PAYMENTS = "payments.v1"
 TOPIC_TOKENS = "tokens.v1"
 TOPIC_FEATURES = "features.v1"
 TOPIC_OUTCOMES = "outcomes.v1"
+TOPIC_VAULT = "vault.v1"
 
 @dataclass
 class SignalDeviation:
@@ -173,6 +185,8 @@ def topic_for(event_type: str) -> str | None:
         return TOPIC_PAYMENTS
     if event_type in (EVENT_TOKEN_CONFIRMED, EVENT_TOKEN_CANCELLED):
         return TOPIC_TOKENS
+    if event_type == EVENT_ENVELOPE_SEALED:
+        return TOPIC_VAULT
     if event_type in (EVENT_FEATURE_BEHAVIOUR, EVENT_FEATURE_INTENT, EVENT_FEATURE_NETWORK):
         return TOPIC_FEATURES
     if event_type == EVENT_OUTCOME_LABELED:

@@ -34,6 +34,7 @@ import (
 	pgchain "github.com/Sagarkhandagre897/AgentShield/internal/chain/postgres"
 	"github.com/Sagarkhandagre897/AgentShield/internal/decision"
 	redisstore "github.com/Sagarkhandagre897/AgentShield/internal/store/redis"
+	"github.com/Sagarkhandagre897/AgentShield/internal/vault"
 )
 
 func env(key, def string) string {
@@ -132,12 +133,17 @@ func main() {
 	}
 	cfg.Identify = identify
 
-	// Provenance ledger: the stream-processor is the CHAIN's single writer (the
-	// architecture diagram), never this service. In single-process mode that
-	// processor runs in-process, and POSTGRES_DSN makes its ledger durable — it
-	// survives a restart and an auditor can walk it long after the reply. In
-	// split-process mode the stream-processor runs in cmd/worker, which owns the
-	// durable CHAIN, so the decision host does not open Postgres here.
+	// Provenance CHAIN + encrypted VAULT: the stream-processor is the single writer
+	// of both (the architecture diagram), never this service. In single-process mode
+	// that processor runs in-process, and POSTGRES_DSN makes both durable — the CHAIN
+	// survives a restart so an auditor can walk it long after the reply, and session
+	// PII is sealed encrypted-at-rest, erasable under a DPDP request. In split-process
+	// mode the stream-processor runs in cmd/worker, which owns both, so the decision
+	// host does not open Postgres here.
+	//
+	// NOTE (dev): the VAULT uses an in-memory KeyRing, so its per-session keys are lost
+	// on restart and previously-sealed rows become unrevealable afterwards. Production
+	// plugs a KMS/HSM behind vault.KeyRing; the seam is identical.
 	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" && !split {
 		pgc, err := pgchain.Open(context.Background(), dsn)
 		if err != nil {
@@ -147,7 +153,14 @@ func main() {
 		cfg.Sink = pgchain.NewSink(pgc, func(err error) {
 			log.Printf("agentshield: durable CHAIN append failed: %v", err)
 		})
-		log.Printf("agentshield: durable PostgreSQL CHAIN enabled (single-process; stream-processor writes it)")
+
+		vlt, err := vault.Open(context.Background(), dsn, vault.NewMemoryKeyRing())
+		if err != nil {
+			log.Fatalf("agentshield: durable VAULT setup failed: %v", err)
+		}
+		defer vlt.Close()
+		cfg.Vault = vault.NewSink(vlt)
+		log.Printf("agentshield: durable PostgreSQL CHAIN + VAULT enabled (single-process; stream-processor writes them)")
 	}
 
 	system, err := app.New(cfg)

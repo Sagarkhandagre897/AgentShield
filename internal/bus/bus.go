@@ -30,6 +30,15 @@ const (
 	EventTokenConfirmed  = "token.confirmed"
 	EventTokenCancelled  = "token.cancelled"
 
+	// EventEnvelopeSealed carries a session's raw PII toward the VAULT, once per
+	// session (§9, §12). It is the ONE PII-bearing event on the bus: the intent
+	// envelope's raw instruction text and the contact behind the session, which the
+	// stream-processor (the single VAULT writer, per the architecture diagram) seals
+	// into the encrypted, erasable store off the clock. Only the envelope DIGEST ever
+	// rides a request; the raw text travels here exactly once and then lives sealed.
+	// It has its own topic (vault.v1) to keep raw PII off the analytic topics.
+	EventEnvelopeSealed = "envelope.sealed"
+
 	// EventOutcomeLabeled is the labeler's output on outcomes.v1 (§6). It is the
 	// ONLY event that carries a training label, and it is emitted off the clock
 	// by the labeler, which distils the settled payment/token lifecycle into one
@@ -90,6 +99,15 @@ const (
 	PayloadPolicyVersion  = "policy_version"  // int; the overlay version in force
 	PayloadRequestDigest  = "request_digest"  // string; SHA-256 fingerprint of the order
 	PayloadEvidenceDigest = "evidence_digest" // string; fingerprint of the evidence scored
+
+	// Envelope-sealing payload keys — the raw PII an envelope.sealed event carries
+	// to the VAULT. session_id is the VAULT key (the store is keyed by session, not
+	// token); the two field values are the plaintext the stream-processor seals, each
+	// under its vault.Field. Both field values are optional — a session may seal an
+	// instruction with no contact on file — but session_id is required to key the row.
+	PayloadSessionID      = "session_id"           // string; the VAULT key
+	PayloadRawInstruction = "raw_instruction_text" // string; the raw purpose text the LLM read (vault.FieldInstruction)
+	PayloadContact        = "contact"              // string; the contact behind the session (vault.FieldContact)
 )
 
 // Label values a settled outcome resolves to. 1.0 is the positive (misuse)
@@ -175,6 +193,27 @@ func PaymentDisputedEvent(eventID, tokenID string, occurredAt int64, nonce strin
 		OccurredAt: occurredAt,
 		Source:     "webhook",
 		Payload:    map[string]any{PayloadNonce: nonce},
+	}
+}
+
+// EnvelopeSealedEvent builds the once-per-session event that carries a session's
+// raw PII to the VAULT. sessionID is the VAULT key (in the payload); tokenID is the
+// partition key, so a mandate's sealing lands in order with its other events. The
+// raw instruction text and contact are optional plaintext the stream-processor
+// seals field-by-field; an empty field is simply not sealed. This is the only event
+// that carries raw PII, and it is consumed by exactly one worker — the VAULT writer.
+func EnvelopeSealedEvent(eventID, tokenID, sessionID string, occurredAt int64, rawInstruction, contact string) domain.Event {
+	return domain.Event{
+		EventID:    eventID,
+		Type:       EventEnvelopeSealed,
+		TokenID:    tokenID,
+		OccurredAt: occurredAt,
+		Source:     "intent-engine",
+		Payload: map[string]any{
+			PayloadSessionID:      sessionID,
+			PayloadRawInstruction: rawInstruction,
+			PayloadContact:        contact,
+		},
 	}
 }
 

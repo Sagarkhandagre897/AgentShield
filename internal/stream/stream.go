@@ -4,12 +4,16 @@
 // the single writer of block-state, so the synchronous plane never has to
 // reconstruct a lien in the request path.
 //
-// It is also the single writer of the provenance CHAIN (the architecture diagram
-// assigns the CHAIN/VAULT write to this processor, not the decision service): the
-// decision service replies and announces decision.made carrying the full record's
-// fields; this processor reconstructs the domain.ProvenanceRecord off the clock
-// and appends it to the ledger. Every decision is recorded — ALLOW, STEP_UP and
-// BLOCK alike — so the audit trail is complete, not just the allowed slice.
+// It is also the single writer of the provenance CHAIN and the encrypted VAULT
+// (the architecture diagram assigns both the CHAIN and the VAULT write to this
+// processor, not the decision service). For the CHAIN: the decision service replies
+// and announces decision.made carrying the full record's fields; this processor
+// reconstructs the domain.ProvenanceRecord off the clock and appends it to the
+// ledger. Every decision is recorded — ALLOW, STEP_UP and BLOCK alike — so the
+// audit trail is complete, not just the allowed slice. For the VAULT: an
+// envelope.sealed event carries a session's raw PII once, and this processor seals
+// each field into the encrypted, erasable store — the only worker that touches it,
+// and never on the clock.
 //
 // Two rules shape what it folds:
 //
@@ -50,23 +54,35 @@ type ProvenanceSink interface {
 	Emit(ctx context.Context, rec *domain.ProvenanceRecord)
 }
 
+// VaultSink seals one field of a session's PII into the encrypted VAULT. vault.Sink
+// satisfies it structurally (no import cycle), so the composition root plugs in the
+// durable store. Unlike the CHAIN's Emit, Seal RETURNS its error: sealing is the
+// whole purpose of the envelope.sealed fold, so a transient failure must redeliver
+// rather than be dropped. field is the wire field name (bus.PayloadRawInstruction /
+// bus.PayloadContact); the sink maps it to a vault.Field.
+type VaultSink interface {
+	Seal(ctx context.Context, sessionID, field, plaintext string) error
+}
+
 // Processor folds events into block-state and records decisions on the CHAIN. It
 // owns no clock: it stamps windows from each event's occurred_at, which keeps
 // replay of historical events deterministic.
 type Processor struct {
 	tokens store.TokenStore
 	chain  ProvenanceSink // CHAIN writer; nil means this processor keeps no ledger
+	vault  VaultSink      // VAULT writer; nil means sealing events are ignored (no PII store)
 
 	mu   sync.Mutex
 	seen map[string]struct{} // event_ids already folded (idempotency)
 }
 
 // New returns a stream-processor writing block-state to the given token store and,
-// when chainSink is non-nil, provenance to the CHAIN behind it. Pass a nil sink to
-// run without a ledger (nonce-spending and consumption still work); the composition
-// root supplies the in-memory or durable CHAIN as the deployment requires.
-func New(tokens store.TokenStore, chainSink ProvenanceSink) *Processor {
-	return &Processor{tokens: tokens, chain: chainSink, seen: make(map[string]struct{})}
+// when the sinks are non-nil, provenance to the CHAIN and sealed PII to the VAULT
+// behind them. Pass nil sinks to run without a ledger or PII store (nonce-spending
+// and consumption still work); the composition root supplies the in-memory or
+// durable stores as the deployment requires.
+func New(tokens store.TokenStore, chainSink ProvenanceSink, vaultSink VaultSink) *Processor {
+	return &Processor{tokens: tokens, chain: chainSink, vault: vaultSink, seen: make(map[string]struct{})}
 }
 
 // Register subscribes the processor to the bus under its consumer group and
@@ -106,6 +122,8 @@ func (p *Processor) apply(ctx context.Context, ev domain.Event) error {
 		return p.foldCapture(ctx, ev)
 	case bus.EventDecisionMade:
 		return p.foldDecision(ctx, ev)
+	case bus.EventEnvelopeSealed:
+		return p.foldEnvelopeSealed(ctx, ev)
 	default:
 		// payment.failed moved no money; token.* is another projection's job.
 		return nil
@@ -152,6 +170,34 @@ func (p *Processor) foldDecision(ctx context.Context, ev domain.Event) error {
 	}
 	if p.chain != nil {
 		p.chain.Emit(ctx, bus.ProvenanceFromEvent(ev))
+	}
+	return nil
+}
+
+// foldEnvelopeSealed seals a session's raw PII into the VAULT — the once-per-session
+// write the architecture diagram assigns to this processor. It seals each field the
+// event carries (raw instruction text, contact) under its own vault.Field; the wire
+// payload key doubles as the field name (bus.PayloadRawInstruction == the vault
+// field), so no mapping table is needed. An absent field is skipped by the sink.
+//
+// Unlike the CHAIN append, a seal error is RETURNED so the bus redelivers: losing
+// the raw text is not acceptable, and vault.Seal is an idempotent upsert, so a
+// redelivered seal overwrites the same row identically. With no VAULT configured
+// (single-process without Postgres) the event is a no-op — there is no PII store to
+// write, and nothing on the clock depends on it.
+func (p *Processor) foldEnvelopeSealed(ctx context.Context, ev domain.Event) error {
+	if p.vault == nil {
+		return nil // no PII store in this deployment; nothing to seal into
+	}
+	sessionID, _ := bus.PayloadString(ev, bus.PayloadSessionID)
+	if sessionID == "" {
+		return nil // no VAULT key; nothing to seal against
+	}
+	for _, field := range []string{bus.PayloadRawInstruction, bus.PayloadContact} {
+		plaintext, _ := bus.PayloadString(ev, field)
+		if err := p.vault.Seal(ctx, sessionID, field, plaintext); err != nil {
+			return err // redeliver; the seen-set is not marked, so no double-seal races here
+		}
 	}
 	return nil
 }

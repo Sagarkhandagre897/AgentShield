@@ -31,6 +31,7 @@ import (
 	"github.com/Sagarkhandagre897/AgentShield/internal/reputation"
 	redisstore "github.com/Sagarkhandagre897/AgentShield/internal/store/redis"
 	"github.com/Sagarkhandagre897/AgentShield/internal/stream"
+	"github.com/Sagarkhandagre897/AgentShield/internal/vault"
 )
 
 func mustEnv(key string) string {
@@ -63,12 +64,22 @@ func main() {
 	}
 	defer b.Close()
 
-	// Provenance CHAIN: the stream-processor is its single writer (architecture
-	// diagram). When POSTGRES_DSN is set the ledger is durable — it survives a
-	// restart and an auditor can walk it long after the decision; a durable append
-	// that fails is logged rather than dropped silently. Absent the DSN the processor
-	// runs without a ledger here (block-state and nonce-spending are unaffected).
-	var chainSink stream.ProvenanceSink
+	// Provenance CHAIN + encrypted VAULT: the stream-processor is the single writer
+	// of both (architecture diagram). When POSTGRES_DSN is set both are durable — the
+	// ledger survives a restart so an auditor can walk it long after the decision,
+	// and session PII is sealed encrypted-at-rest, erasable under a DPDP request. A
+	// durable CHAIN append that fails is logged rather than dropped silently; a VAULT
+	// seal that fails redelivers, because losing raw PII is never acceptable. Absent
+	// the DSN the processor runs without either (block-state and nonce-spending are
+	// unaffected).
+	//
+	// NOTE (dev): the VAULT here uses an in-memory KeyRing, so its per-session keys
+	// are lost on restart and previously-sealed rows become unrevealable afterwards.
+	// Production plugs a KMS/HSM behind vault.KeyRing; the seam is identical.
+	var (
+		chainSink stream.ProvenanceSink
+		vaultSink stream.VaultSink
+	)
 	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
 		pgc, err := pgchain.Open(ctx, dsn)
 		if err != nil {
@@ -78,7 +89,14 @@ func main() {
 		chainSink = pgchain.NewSink(pgc, func(err error) {
 			log.Printf("worker: durable CHAIN append failed: %v", err)
 		})
-		log.Printf("worker: durable PostgreSQL CHAIN enabled")
+
+		vlt, err := vault.Open(ctx, dsn, vault.NewMemoryKeyRing())
+		if err != nil {
+			log.Fatalf("worker: durable VAULT setup failed: %v", err)
+		}
+		defer vlt.Close()
+		vaultSink = vault.NewSink(vlt)
+		log.Printf("worker: durable PostgreSQL CHAIN + VAULT enabled")
 	}
 
 	// The materialiser is the single writer to the feature store; the
@@ -88,7 +106,7 @@ func main() {
 	// publishes. All fold from the bus, idempotent on event_id.
 	mat := materialise.New(tokens, fstore, nil)
 	rep := reputation.New(mat, reputation.DefaultParams(), nil)
-	strm := stream.New(tokens, chainSink)
+	strm := stream.New(tokens, chainSink, vaultSink)
 	lbl := labeler.New(b, labeler.DefaultParams())
 
 	var cancels []func()
