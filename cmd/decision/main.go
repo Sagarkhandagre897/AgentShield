@@ -1,6 +1,8 @@
-// Command decision is the AgentShield synchronous-plane entrypoint: one
-// stateless gRPC service in front of the three hot stores. It answers Evaluate
-// before money moves and nothing else.
+// Command decision is the AgentShield entrypoint: it serves the synchronous
+// plane's gRPC Evaluate in front of the in-process composition root, which wires
+// the three hot stores, the bus, the CHAIN and the three off-clock workers into
+// one running system. Evaluate answers before money moves; the async plane folds
+// outcomes back into the shared state behind it.
 //
 // Transport is mutual TLS when AGENTSHIELD_TLS_CERT / _KEY / _CA are set — the
 // caller identity P5 verifies comes from the client certificate. With no certs
@@ -21,11 +23,8 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	pb "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1"
-	"github.com/Sagarkhandagre897/AgentShield/internal/chain"
+	"github.com/Sagarkhandagre897/AgentShield/internal/app"
 	"github.com/Sagarkhandagre897/AgentShield/internal/decision"
-	"github.com/Sagarkhandagre897/AgentShield/internal/features"
-	"github.com/Sagarkhandagre897/AgentShield/internal/score"
-	"github.com/Sagarkhandagre897/AgentShield/internal/store/memory"
 )
 
 func env(key, def string) string {
@@ -69,50 +68,43 @@ func serverTLS() (credentials.TransportCredentials, error) {
 func main() {
 	addr := env("AGENTSHIELD_ADDR", ":8443")
 
-	// In-memory hot stores. Redis/Dragonfly adapters land with the async plane,
-	// behind the same interfaces.
-	tokens := memory.NewTokenStore()
-	policies := memory.NewPolicyStore()
-	fstore := memory.NewFeatureStore()
-
-	// The CHAIN: every decision is recorded here after the reply, hash-linked so
-	// the history is tamper-evident. In-process for the dev entrypoint; a
-	// PostgreSQL backing lands behind the same sink.
-	provenance := chain.New()
-
 	creds, err := serverTLS()
 	if err != nil {
 		log.Fatalf("agentshield: TLS setup failed: %v", err)
 	}
 
-	cfg := decision.Config{
-		Tokens:   tokens,
-		Policies: policies,
-		Features: features.NewReader(fstore, features.DefaultStalenessBudgetSeconds),
-		Scorer:   score.NewLinearScorer(score.DefaultWeights),
-		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
-		Sink:     chain.NewSink(provenance),
-	}
-
+	// Caller identity: from the mTLS client cert in production, or a fixed dev
+	// identity when running without a PKI.
+	var identify func(context.Context) string
 	var opts []grpc.ServerOption
 	if creds != nil {
 		opts = append(opts, grpc.Creds(creds))
-		cfg.Identify = decision.MTLSIdentity
+		identify = decision.MTLSIdentity
 		log.Printf("agentshield: mutual TLS enabled")
 	} else {
 		devID := env("AGENTSHIELD_DEV_IDENTITY", "dev-caller")
-		cfg.Identify = func(context.Context) string { return devID }
+		identify = func(context.Context) string { return devID }
 		log.Printf("agentshield: WARNING starting WITHOUT mTLS (dev mode); caller identity = %q", devID)
 	}
 
+	// The whole in-process system: the decision service in front, and the bus,
+	// CHAIN and three off-clock workers behind it, all sharing one set of stores.
+	// In-memory adapters keep it runnable without Kafka/Redis/PostgreSQL; each
+	// lands behind the same interfaces.
+	system, err := app.New(app.Config{Identify: identify})
+	if err != nil {
+		log.Fatalf("agentshield: wiring failed: %v", err)
+	}
+	defer system.Close()
+
 	grpcServer := grpc.NewServer(opts...)
-	pb.RegisterDecisionServer(grpcServer, decision.New(cfg))
+	pb.RegisterDecisionServer(grpcServer, system.Decision)
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("agentshield: listen %s: %v", addr, err)
 	}
-	log.Printf("agentshield: decision service listening on %s", addr)
+	log.Printf("agentshield: listening on %s (decision service + async plane, in-process)", addr)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("agentshield: serve: %v", err)
 	}
