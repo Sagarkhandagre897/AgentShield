@@ -30,6 +30,15 @@ const (
 	EventTokenConfirmed  = "token.confirmed"
 	EventTokenCancelled  = "token.cancelled"
 
+	// EventOutcomeLabeled is the labeler's output on outcomes.v1 (§6). It is the
+	// ONLY event that carries a training label, and it is emitted off the clock
+	// by the labeler, which distils the settled payment/token lifecycle into one
+	// label per settled outcome. A label may come only from a settled outcome —
+	// a dispute, a cancellation, a confirmed step-up — never from "no complaint
+	// arrived," and never from our own past verdicts, which would teach the
+	// models to agree with yesterday's mistakes.
+	EventOutcomeLabeled = "outcome.labeled"
+
 	// Feature-deposit events — the up meeting point for the off-clock ML engines
 	// (§8, §10). An engine computes its one calibrated figure off the clock and
 	// publishes it here; the feature-materialiser (the single writer) consumes it
@@ -60,6 +69,31 @@ const (
 	PayloadDivergence       = "divergence"        // float64; intent_divergence
 	PayloadRisk             = "risk"              // float64; network_risk
 	PayloadSignalDeviations = "signal_deviations" // []domain.SignalDeviation; per-signal breakdown (behaviour)
+
+	// Outcome-label payload keys. A label event is keyed (like every bus message)
+	// on token_id for per-token ordering; these carry the label itself, how much
+	// to trust it, and why it was assigned so a trainer can filter by reason.
+	PayloadLabel  = "label"  // float64; 1.0 = misuse, 0.0 = legitimate — the training target
+	PayloadWeight = "weight" // float64; confidence in [0,1] — a dispute weighs full, a bare cancellation less
+	PayloadReason = "reason" // string; one of the Reason* values below
+)
+
+// Label values a settled outcome resolves to. 1.0 is the positive (misuse)
+// class the models are trained to raise risk on; 0.0 is a confirmed-legitimate
+// outcome. There is deliberately no "unknown" label — a lifecycle event that
+// does not settle into one of these produces no label at all.
+const (
+	LabelMisuse = 1.0
+	LabelLegit  = 0.0
+)
+
+// Reasons a label was assigned — the settled outcome it came from. Each is an
+// external fact about what happened to the money or the mandate, independent of
+// what we decided.
+const (
+	ReasonDispute         = "dispute"           // a chargeback/dispute — the strongest settled negative
+	ReasonCancellation    = "cancellation"      // the mandate was pulled — a soft negative, weighed lightly
+	ReasonConfirmedStepUp = "confirmed_step_up" // the human passed a step-up and money then moved — a legitimate outcome
 )
 
 // Decision payload values mirror the verdict answers as plain strings, so the
@@ -178,6 +212,28 @@ func FeatureNetworkDepositEvent(eventID, tokenID, featureKey string, occurredAt 
 		EventID: eventID, Type: EventFeatureNetwork, TokenID: tokenID,
 		OccurredAt: occurredAt, Source: "graph-engine",
 		Payload: map[string]any{PayloadFeatureKey: featureKey, PayloadRisk: risk},
+	}
+}
+
+// OutcomeLabeledEvent builds the labeler's output on outcomes.v1: one training
+// label distilled from a settled outcome. tokenID keys it (per-token ordering);
+// occurredAt is the settling event's time, which the trainer uses for a
+// point-in-time join back to the feature vector as it stood then. label is the
+// target (LabelMisuse / LabelLegit), weight the confidence, reason the settled
+// outcome it came from. Any agent_id / customer_id carried by the settling event
+// rides along so the trainer can attribute the label without another lookup.
+func OutcomeLabeledEvent(eventID, tokenID string, occurredAt int64, label, weight float64, reason string) domain.Event {
+	return domain.Event{
+		EventID:    eventID,
+		Type:       EventOutcomeLabeled,
+		TokenID:    tokenID,
+		OccurredAt: occurredAt,
+		Source:     "labeler",
+		Payload: map[string]any{
+			PayloadLabel:  label,
+			PayloadWeight: weight,
+			PayloadReason: reason,
+		},
 	}
 }
 

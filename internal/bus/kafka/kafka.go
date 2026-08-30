@@ -52,6 +52,8 @@ func topicFor(eventType string) (string, bool) {
 		return TopicTokens, true
 	case bus.EventFeatureBehaviour, bus.EventFeatureIntent, bus.EventFeatureNetwork:
 		return TopicFeatures, true
+	case bus.EventOutcomeLabeled:
+		return TopicOutcomes, true
 	default:
 		return "", false
 	}

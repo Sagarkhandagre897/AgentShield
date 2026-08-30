@@ -24,6 +24,7 @@ func TestTopicForRouting(t *testing.T) {
 		bus.EventFeatureBehaviour: TopicFeatures,
 		bus.EventFeatureIntent:    TopicFeatures,
 		bus.EventFeatureNetwork:   TopicFeatures,
+		bus.EventOutcomeLabeled:   TopicOutcomes,
 	}
 	for typ, want := range cases {
 		got, ok := topicFor(typ)

@@ -25,6 +25,7 @@ import (
 
 	"github.com/Sagarkhandagre897/AgentShield/internal/bus"
 	kafkabus "github.com/Sagarkhandagre897/AgentShield/internal/bus/kafka"
+	"github.com/Sagarkhandagre897/AgentShield/internal/labeler"
 	"github.com/Sagarkhandagre897/AgentShield/internal/materialise"
 	"github.com/Sagarkhandagre897/AgentShield/internal/reputation"
 	redisstore "github.com/Sagarkhandagre897/AgentShield/internal/store/redis"
@@ -63,16 +64,20 @@ func main() {
 
 	// The materialiser is the single writer to the feature store; the
 	// reputation-builder deposits through it. The stream-processor writes
-	// block-state. All three fold from the bus, idempotent on event_id.
+	// block-state. The labeler turns settled outcomes into labels on
+	// outcomes.v1 — it is the only worker that also publishes. All fold from the
+	// bus, idempotent on event_id.
 	mat := materialise.New(tokens, fstore, nil)
 	rep := reputation.New(mat, reputation.DefaultParams(), nil)
 	strm := stream.New(tokens)
+	lbl := labeler.New(b, labeler.DefaultParams())
 
 	var cancels []func()
 	for name, register := range map[string]func(bus.Bus) (func(), error){
 		"stream-processor":     strm.Register,
 		"feature-materialiser": mat.Register,
 		"reputation-builder":   rep.Register,
+		"labeler":              lbl.Register,
 	} {
 		cancel, err := register(b)
 		if err != nil {
@@ -80,7 +85,7 @@ func main() {
 		}
 		cancels = append(cancels, cancel)
 	}
-	log.Printf("worker: off-clock plane running (redis=%s, kafka=%v) — stream-processor, materialiser, reputation-builder", redisAddr, seeds)
+	log.Printf("worker: off-clock plane running (redis=%s, kafka=%v) — stream-processor, materialiser, reputation-builder, labeler", redisAddr, seeds)
 
 	// Block until a shutdown signal, then stop the workers and release backends.
 	sig := make(chan os.Signal, 1)
