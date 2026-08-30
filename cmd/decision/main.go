@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	pb "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1"
+	"github.com/Sagarkhandagre897/AgentShield/internal/chain"
 	"github.com/Sagarkhandagre897/AgentShield/internal/decision"
 	"github.com/Sagarkhandagre897/AgentShield/internal/features"
 	"github.com/Sagarkhandagre897/AgentShield/internal/score"
@@ -74,6 +75,11 @@ func main() {
 	policies := memory.NewPolicyStore()
 	fstore := memory.NewFeatureStore()
 
+	// The CHAIN: every decision is recorded here after the reply, hash-linked so
+	// the history is tamper-evident. In-process for the dev entrypoint; a
+	// PostgreSQL backing lands behind the same sink.
+	provenance := chain.New()
+
 	creds, err := serverTLS()
 	if err != nil {
 		log.Fatalf("agentshield: TLS setup failed: %v", err)
@@ -85,6 +91,7 @@ func main() {
 		Features: features.NewReader(fstore, features.DefaultStalenessBudgetSeconds),
 		Scorer:   score.NewLinearScorer(score.DefaultWeights),
 		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
+		Sink:     chain.NewSink(provenance),
 	}
 
 	var opts []grpc.ServerOption
