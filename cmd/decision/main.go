@@ -23,6 +23,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -132,6 +133,31 @@ func main() {
 		log.Fatalf("agentshield: backend setup failed: %v", err)
 	}
 	cfg.Identify = identify
+
+	// Optional demo/deployment knobs (§7, §8). The interruption cost is "provisional
+	// and policy-tunable"; a deployment scales it to its debit values. The staleness
+	// budget is per-deployment, and 0 disables the check for a long replay against a
+	// store warmed once at the start. Both default to the package defaults when unset.
+	if v := os.Getenv("AGENTSHIELD_INTERRUPTION_COST_PAISE"); v != "" {
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil || n <= 0 {
+			log.Fatalf("agentshield: AGENTSHIELD_INTERRUPTION_COST_PAISE=%q must be a positive integer", v)
+		}
+		cfg.InterruptionCostPaise = n
+		log.Printf("agentshield: interruption cost overridden to %d paise", n)
+	}
+	if v := os.Getenv("AGENTSHIELD_STALENESS_BUDGET_SECONDS"); v != "" {
+		n, perr := strconv.ParseInt(v, 10, 64)
+		if perr != nil {
+			log.Fatalf("agentshield: AGENTSHIELD_STALENESS_BUDGET_SECONDS=%q must be an integer", v)
+		}
+		cfg.StalenessBudgetSeconds = &n
+		if n <= 0 {
+			log.Printf("agentshield: feature staleness check DISABLED (budget=%d)", n)
+		} else {
+			log.Printf("agentshield: feature staleness budget overridden to %ds", n)
+		}
+	}
 
 	// Provenance CHAIN + encrypted VAULT: the stream-processor is the single writer
 	// of both (the architecture diagram), never this service. In single-process mode

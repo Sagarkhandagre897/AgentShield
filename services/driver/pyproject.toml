@@ -1,0 +1,24 @@
+[project]
+name = "agentshield-driver"
+version = "0.1.0"
+description = "AgentShield live driver (Phase 7 component 2) — the Python orchestrator half of the two-part driver. It owns a generated Scenario, the timeline order, the barrier logic and the oracle scoring, and shells out to the contract-bound Go driverkit (cmd/driverkit) for every action that must touch a real AgentShield contract. It replays a scenario against the live split-process system (Redis + Redpanda + the decision gRPC), collects the settled labels the real Go labeler produces, and scores the live verdicts + labels against the generator's ground truth."
+requires-python = ">=3.10"
+# Pure stdlib on purpose. The orchestrator speaks newline-delimited JSON to the
+# Go driverkit subprocess over stdin/stdout, manages the docker-compose stack and
+# the split-process binaries with subprocess, and reads the generated Scenario as
+# plain data. It needs no wheels — the exact same generated bindings, store schemas
+# and bus builders the product runs with live in the Go driverkit, so there is zero
+# stub drift and nothing to pip-install here. The generator (services/generator) is
+# imported from its sibling directory at runtime, or a pre-built scenario.json is
+# loaded; neither requires installation.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agentshield_driver"]

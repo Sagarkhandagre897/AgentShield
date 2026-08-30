@@ -72,6 +72,20 @@ type Config struct {
 	// the clock reads it. The write belongs to the stream-processor (architecture
 	// diagram), never the decision service.
 	Vault stream.VaultSink
+
+	// InterruptionCostPaise overrides the wrongful-step-up cost decide() weighs the
+	// expected loss against (§7). Zero keeps score.DefaultInterruptionCostPaise. It is
+	// explicitly "provisional and policy-tunable" (score.go): a deployment sets it to
+	// its own debit-value scale, and a demo tunes it so the pre-model linear scorer
+	// discriminates instead of stepping up every non-trivial amount.
+	InterruptionCostPaise int64
+
+	// StalenessBudgetSeconds overrides the feature staleness budget (§8). Nil keeps
+	// features.DefaultStalenessBudgetSeconds; a non-nil value is used verbatim,
+	// including 0, which disables the staleness check (features.NewReader treats
+	// budget <= 0 as "off"). A long-running replay against a store warmed once at the
+	// start sets 0 so those prior rows stay valid across the whole run.
+	StalenessBudgetSeconds *int64
 }
 
 // App is the wired in-process system. The stores, bus and CHAIN are exported so a
@@ -173,12 +187,24 @@ func New(cfg Config) (*App, error) {
 		}
 	}
 
+	// Feature staleness budget and step-up cost: defaults unless the Config tunes
+	// them (a split-process demo does, to disable staleness over a long replay and
+	// scale the interruption cost to its debit values).
+	budget := features.DefaultStalenessBudgetSeconds
+	if cfg.StalenessBudgetSeconds != nil {
+		budget = *cfg.StalenessBudgetSeconds
+	}
+	interruption := score.DefaultInterruptionCostPaise
+	if cfg.InterruptionCostPaise > 0 {
+		interruption = cfg.InterruptionCostPaise
+	}
+
 	a.Decision = decision.New(decision.Config{
 		Tokens:   tokens,
 		Policies: policies,
-		Features: features.NewReader(fstore, features.DefaultStalenessBudgetSeconds),
+		Features: features.NewReader(fstore, budget),
 		Scorer:   score.NewLinearScorer(score.DefaultWeights),
-		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
+		Params:   score.Params{InterruptionCostPaise: interruption},
 		Events:   b, // decision.made (carrying provenance), going down (the bus meeting point)
 		Identify: cfg.Identify,
 		Now:      now,
