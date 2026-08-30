@@ -26,6 +26,7 @@ EVENT_TOKEN_CANCELLED = "token.cancelled"
 EVENT_FEATURE_BEHAVIOUR = "feature.behaviour.deposited"
 EVENT_FEATURE_INTENT = "feature.intent.deposited"
 EVENT_FEATURE_NETWORK = "feature.network.deposited"
+EVENT_OUTCOME_LABELED = "outcome.labeled"
 
 # --- Payload keys (mirror internal/bus/bus.go) -----------------------------
 PAYLOAD_AMOUNT_PAISE = "amount_paise"
@@ -38,6 +39,16 @@ PAYLOAD_DEVIATION = "deviation"
 PAYLOAD_DIVERGENCE = "divergence"
 PAYLOAD_RISK = "risk"
 PAYLOAD_SIGNAL_DEVIATIONS = "signal_deviations"
+PAYLOAD_LABEL = "label"
+PAYLOAD_WEIGHT = "weight"
+PAYLOAD_REASON = "reason"
+
+# --- Label values and reasons (mirror internal/bus/bus.go) -----------------
+LABEL_MISUSE = 1.0
+LABEL_LEGIT = 0.0
+REASON_DISPUTE = "dispute"
+REASON_CANCELLATION = "cancellation"
+REASON_CONFIRMED_STEP_UP = "confirmed_step_up"
 
 # --- Topics (mirror internal/bus/kafka/kafka.go) ---------------------------
 TOPIC_EVALUATIONS = "evaluations.v1"
@@ -164,4 +175,6 @@ def topic_for(event_type: str) -> str | None:
         return TOPIC_TOKENS
     if event_type in (EVENT_FEATURE_BEHAVIOUR, EVENT_FEATURE_INTENT, EVENT_FEATURE_NETWORK):
         return TOPIC_FEATURES
+    if event_type == EVENT_OUTCOME_LABELED:
+        return TOPIC_OUTCOMES
     return None

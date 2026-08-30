@@ -1,0 +1,18 @@
+[project]
+name = "agentshield-trainer"
+version = "0.1.0"
+description = "AgentShield offline retrain loop (§6, §11, §13) — settled labels + replayed features → persisted model artifacts"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agentshield_trainer"]
