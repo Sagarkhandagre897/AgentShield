@@ -1,0 +1,71 @@
+# AgentShield off-clock infrastructure: the bus (Redpanda) and the hot stores
+# (Redis) the two planes meet at. This is dev/local topology — one broker, one
+# Redis — not a capacity statement; sizing lives in the System Design PDF.
+#
+# Bring it up with:   docker compose -f deploy/docker-compose.yml up -d
+# Then run the split-process binaries against it:
+#   REDIS_ADDR=localhost:6379 KAFKA_SEEDS=localhost:19092 go run ./cmd/worker
+#   REDIS_ADDR=localhost:6379 KAFKA_SEEDS=localhost:19092 go run ./cmd/decision
+#
+# Redpanda advertises two listeners: in-cluster clients use redpanda:9092, host
+# clients (the binaries above, the Go integration tests) use localhost:19092.
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: agentshield-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092
+      - --advertise-kafka-addr=INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
+    ports:
+      - "19092:19092" # Kafka API for host clients
+      - "9644:9644"   # admin API
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: create the four live topics plus outcomes.v1 (reserved for the
+  # learning loop). token_id keys every one, so partitions preserve per-token
+  # order. Idempotent — re-running compose leaves existing topics untouched.
+  topic-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: agentshield-topic-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        rpk topic create
+        evaluations.v1 payments.v1 tokens.v1 features.v1 outcomes.v1
+        --brokers redpanda:9092 --partitions 3 --replicas 1
+        || true
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: agentshield-redis
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  redpanda-data:
+  redis-data:
