@@ -1,0 +1,24 @@
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
+# Local TLS dev material (generated, never committed)
+/certs/
+
+# Env
+.env
+.env.*
+
+# Python (asynchronous plane, added later)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

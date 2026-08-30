@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package agentshield.v1;
+
+option go_package = "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1;agentshieldv1";
+
+// Decision is the ONLY method the synchronous plane exposes. One request in,
+// one lean answer out. Everything slow lives off the request (System Design §4).
+service Decision {
+  rpc Evaluate(OrderContext) returns (Verdict);
+}
+
+// tool_risk is a DECLARED field on the request, not something we verified.
+// It can heighten caution (STEP-UP) but must never BLOCK on its own (§5).
+enum ToolRisk {
+  TOOL_RISK_UNSPECIFIED = 0;
+  TOOL_RISK_LOW = 1;
+  TOOL_RISK_MEDIUM = 2;
+  TOOL_RISK_HIGH = 3;
+  TOOL_RISK_CRITICAL = 4;
+}
+
+// OrderContext carries everything the predicates and the score need, all by
+// value or by key — the service fetches nothing from a third party (§4).
+message OrderContext {
+  string evaluation_id = 1;   // idempotency key; dedupes retries — the input to P1
+  string token_id = 2;        // the mandate; key for policy and block-state
+  string customer_id = 3;     // the human principal; a feature-store key
+  string agent_id = 4;        // the acting agent; a feature-store and graph key
+  string merchant_id = 5;     // the payee; used by P2 scope and the graph
+  string session_id = 6;      // the session the intent envelope was sealed in
+  int64 amount_paise = 7;     // debit amount in paise; P2, P6, expected-loss decide
+  string cart_hash = 8;       // digest binding the order to its line items — P6
+  string envelope_digest = 9; // sealed intent digest from order.notes; P3 + intent
+  ToolRisk tool_risk = 10;    // declared field, not a guess
+  string nonce = 11;          // replay nonce; P1 and freshness
+  int64 ts = 12;              // client timestamp; P1 and freshness
+}
+
+// Answer is the three-way verdict (§1).
+enum Answer {
+  ANSWER_UNSPECIFIED = 0;
+  ANSWER_ALLOW = 1;
+  ANSWER_STEP_UP = 2;
+  ANSWER_BLOCK = 3;
+}
+
+// Code is the fixed caller-facing enum; each maps to exactly one cause (§4).
+// It is never an interpolated string — a caller who could read a free-form
+// reason (or a score) could probe the boundary.
+enum Code {
+  CODE_UNSPECIFIED = 0;
+  OK_ALLOW = 1;           // ALLOW   — expected loss below the interruption cost
+  STEPUP_SCOPE = 2;       // STEP-UP — P2, outside agreed scope
+  STEPUP_UNBOUND = 3;     // STEP-UP — P3, debit not bound to an instruction
+  STEPUP_RISK = 4;        // STEP-UP — score raised expected loss above cost
+  STEPUP_FAILCLOSED = 5;  // STEP-UP — a needed signal was missing, stale or errored
+  BLOCKED_DUPLICATE = 6;  // BLOCK   — P1, replay of a seen request
+  BLOCKED_AUTHORITY = 7;  // BLOCK   — P4, authority expired, revoked or exhausted
+  BLOCKED_IDENTITY = 8;   // BLOCK   — P5, identity or slip cannot be verified
+  BLOCKED_BINDING = 9;    // BLOCK   — P6, amount does not bind to the order
+}
+
+// Verdict is the lean, caller-facing answer and nothing more: no score, no
+// band, no threshold (§4). The full provenance record is written to the CHAIN
+// AFTER the reply and is never put on this wire.
+message Verdict {
+  string evaluation_id = 1;
+  Answer decision = 2;
+  Code code = 3;
+  bool retryable = 4;
+}
