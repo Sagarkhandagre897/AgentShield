@@ -132,11 +132,13 @@ func main() {
 	}
 	cfg.Identify = identify
 
-	// Provenance ledger: durable PostgreSQL CHAIN when POSTGRES_DSN is set (the
-	// history survives a restart and an auditor can walk it long after the reply),
-	// else the in-process append-only chain. Gated independently of the store/bus
-	// split — a single-process root can still keep a durable ledger.
-	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
+	// Provenance ledger: the stream-processor is the CHAIN's single writer (the
+	// architecture diagram), never this service. In single-process mode that
+	// processor runs in-process, and POSTGRES_DSN makes its ledger durable — it
+	// survives a restart and an auditor can walk it long after the reply. In
+	// split-process mode the stream-processor runs in cmd/worker, which owns the
+	// durable CHAIN, so the decision host does not open Postgres here.
+	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" && !split {
 		pgc, err := pgchain.Open(context.Background(), dsn)
 		if err != nil {
 			log.Fatalf("agentshield: durable CHAIN setup failed: %v", err)
@@ -145,7 +147,7 @@ func main() {
 		cfg.Sink = pgchain.NewSink(pgc, func(err error) {
 			log.Printf("agentshield: durable CHAIN append failed: %v", err)
 		})
-		log.Printf("agentshield: durable PostgreSQL CHAIN enabled")
+		log.Printf("agentshield: durable PostgreSQL CHAIN enabled (single-process; stream-processor writes it)")
 	}
 
 	system, err := app.New(cfg)

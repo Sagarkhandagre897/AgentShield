@@ -76,6 +76,20 @@ const (
 	PayloadLabel  = "label"  // float64; 1.0 = misuse, 0.0 = legitimate — the training target
 	PayloadWeight = "weight" // float64; confidence in [0,1] — a dispute weighs full, a bare cancellation less
 	PayloadReason = "reason" // string; one of the Reason* values below
+
+	// Provenance payload keys — the rest of the ProvenanceRecord a decision.made
+	// event carries so the stream-processor (the CHAIN's single writer, per the
+	// architecture diagram) can rebuild the full record off the clock and append
+	// it, without the decision service ever touching the ledger. evaluation_id,
+	// decision and timestamp already ride the envelope (EventID / PayloadDecision
+	// / OccurredAt); these are what remains. request_digest is a hash of the order
+	// computed on the clock, so the raw request never travels the bus — only its
+	// fingerprint, enough to bind the audit record to what was asked.
+	PayloadCode           = "code"            // string; the pb.Code verdict reason
+	PayloadPredicateFailed = "predicate_failed" // string; which of P1-P6 refused, if any
+	PayloadPolicyVersion  = "policy_version"  // int; the overlay version in force
+	PayloadRequestDigest  = "request_digest"  // string; SHA-256 fingerprint of the order
+	PayloadEvidenceDigest = "evidence_digest" // string; fingerprint of the evidence scored
 )
 
 // Label values a settled outcome resolves to. 1.0 is the positive (misuse)
@@ -174,6 +188,57 @@ func WithAgent(ev domain.Event, agentID string) domain.Event {
 	}
 	ev.Payload[PayloadAgentID] = agentID
 	return ev
+}
+
+// WithProvenance decorates a decision.made event with the provenance fields the
+// stream-processor needs to rebuild the full domain.ProvenanceRecord and append
+// it to the CHAIN off the clock (mirroring WithAgent). The record's evaluation_id,
+// decision and timestamp already ride the event envelope (EventID / PayloadDecision
+// / OccurredAt), so only the remaining fields are stamped here; empty optional
+// fields are omitted. PrevHash is not carried — the CHAIN stamps it at append time.
+func WithProvenance(ev domain.Event, rec *domain.ProvenanceRecord) domain.Event {
+	if rec == nil {
+		return ev
+	}
+	if ev.Payload == nil {
+		ev.Payload = map[string]any{}
+	}
+	ev.Payload[PayloadCode] = rec.Code
+	ev.Payload[PayloadPolicyVersion] = rec.PolicyVersion
+	if rec.PredicateFailed != "" {
+		ev.Payload[PayloadPredicateFailed] = rec.PredicateFailed
+	}
+	if rec.RequestDigest != "" {
+		ev.Payload[PayloadRequestDigest] = rec.RequestDigest
+	}
+	if rec.EvidenceDigest != "" {
+		ev.Payload[PayloadEvidenceDigest] = rec.EvidenceDigest
+	}
+	return ev
+}
+
+// ProvenanceFromEvent rebuilds the domain.ProvenanceRecord a decision.made event
+// carries: the evaluation_id, decision and timestamp come from the envelope, the
+// rest from the payload WithProvenance stamped. PrevHash is left empty — the CHAIN
+// stamps the link when it appends. This is the read side of the reply-then-record
+// seam: the decision service publishes, the stream-processor reconstructs and writes.
+func ProvenanceFromEvent(ev domain.Event) *domain.ProvenanceRecord {
+	decision, _ := PayloadString(ev, PayloadDecision)
+	code, _ := PayloadString(ev, PayloadCode)
+	predicateFailed, _ := PayloadString(ev, PayloadPredicateFailed)
+	requestDigest, _ := PayloadString(ev, PayloadRequestDigest)
+	evidenceDigest, _ := PayloadString(ev, PayloadEvidenceDigest)
+	policyVersion, _ := PayloadInt64(ev, PayloadPolicyVersion)
+	return &domain.ProvenanceRecord{
+		EvaluationID:    ev.EventID,
+		RequestDigest:   requestDigest,
+		Decision:        decision,
+		Code:            code,
+		PredicateFailed: predicateFailed,
+		EvidenceDigest:  evidenceDigest,
+		PolicyVersion:   int(policyVersion),
+		TS:              ev.OccurredAt,
+	}
 }
 
 // FeatureBehaviourDepositEvent carries a behaviour engine's calibrated deviation

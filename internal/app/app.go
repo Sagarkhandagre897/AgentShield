@@ -54,13 +54,15 @@ type Config struct {
 	Features store.FeatureStore // durable feature store (default: in-memory)
 	Bus      bus.Bus            // durable bus (default: in-memory)
 
-	// Sink, if non-nil, receives provenance in place of the in-process CHAIN.
+	// Sink, if non-nil, is the CHAIN the stream-processor writes provenance to in
+	// single-process mode, in place of the in-memory Chain exposed on App.Chain.
 	// cmd/decision supplies the durable PostgreSQL ledger (internal/chain/postgres)
-	// here when POSTGRES_DSN is set, so the history survives a restart; left nil,
-	// New writes to the in-memory Chain it exposes on App.Chain. This gate is
-	// independent of the store/bus split — a single-process root can still keep a
-	// durable ledger.
-	Sink decision.ProvenanceSink
+	// here when POSTGRES_DSN is set and no split backends are, so a single-process
+	// root can still keep a durable, restart-surviving ledger. In split-process mode
+	// the stream-processor runs in cmd/worker, which owns the durable CHAIN, so this
+	// is ignored. The write itself always belongs to the stream-processor — the
+	// decision service never touches the ledger (per the architecture diagram).
+	Sink stream.ProvenanceSink
 }
 
 // App is the wired in-process system. The stores, bus and CHAIN are exported so a
@@ -112,6 +114,15 @@ func New(cfg Config) (*App, error) {
 	}
 	ledger := chain.New()
 
+	// The CHAIN's single writer is the stream-processor (architecture diagram): it
+	// appends provenance from the decision.made events the decision service publishes.
+	// The durable PostgreSQL ledger is used when supplied on cfg.Sink, else the
+	// in-memory Chain this root exposes on App.Chain for inspection.
+	var chainSink stream.ProvenanceSink = chain.NewSink(ledger)
+	if cfg.Sink != nil {
+		chainSink = cfg.Sink
+	}
+
 	a := &App{
 		Tokens:   tokens,
 		Policies: policies,
@@ -126,10 +137,11 @@ func New(cfg Config) (*App, error) {
 	if !external {
 		// The materialiser is the single writer to the feature store; every other
 		// producer deposits through it. The reputation-builder is one such producer,
-		// so it takes the materialiser as its Depositor.
+		// so it takes the materialiser as its Depositor. The stream-processor writes
+		// block-state and, as the CHAIN's single writer, appends provenance too.
 		mat := materialise.New(tokens, fstore, now)
 		rep := reputation.New(mat, reputation.DefaultParams(), now)
-		strm := stream.New(tokens)
+		strm := stream.New(tokens, chainSink)
 		a.Stream, a.Materialiser, a.Reputation = strm, mat, rep
 
 		// Subscribe every worker, collecting cancels so Close can stop them. A failed
@@ -147,21 +159,13 @@ func New(cfg Config) (*App, error) {
 		}
 	}
 
-	// Provenance sink: the durable PostgreSQL ledger when one was supplied, else
-	// the in-process CHAIN this root exposes on App.Chain.
-	var sink decision.ProvenanceSink = chain.NewSink(ledger)
-	if cfg.Sink != nil {
-		sink = cfg.Sink
-	}
-
 	a.Decision = decision.New(decision.Config{
 		Tokens:   tokens,
 		Policies: policies,
 		Features: features.NewReader(fstore, features.DefaultStalenessBudgetSeconds),
 		Scorer:   score.NewLinearScorer(score.DefaultWeights),
 		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
-		Sink:     sink, // provenance, going down
-		Events:   b,    // decision.made, going down (the bus meeting point)
+		Events:   b, // decision.made (carrying provenance), going down (the bus meeting point)
 		Identify: cfg.Identify,
 		Now:      now,
 	})

@@ -25,6 +25,7 @@ import (
 
 	"github.com/Sagarkhandagre897/AgentShield/internal/bus"
 	kafkabus "github.com/Sagarkhandagre897/AgentShield/internal/bus/kafka"
+	pgchain "github.com/Sagarkhandagre897/AgentShield/internal/chain/postgres"
 	"github.com/Sagarkhandagre897/AgentShield/internal/labeler"
 	"github.com/Sagarkhandagre897/AgentShield/internal/materialise"
 	"github.com/Sagarkhandagre897/AgentShield/internal/reputation"
@@ -62,14 +63,32 @@ func main() {
 	}
 	defer b.Close()
 
+	// Provenance CHAIN: the stream-processor is its single writer (architecture
+	// diagram). When POSTGRES_DSN is set the ledger is durable — it survives a
+	// restart and an auditor can walk it long after the decision; a durable append
+	// that fails is logged rather than dropped silently. Absent the DSN the processor
+	// runs without a ledger here (block-state and nonce-spending are unaffected).
+	var chainSink stream.ProvenanceSink
+	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
+		pgc, err := pgchain.Open(ctx, dsn)
+		if err != nil {
+			log.Fatalf("worker: durable CHAIN setup failed: %v", err)
+		}
+		defer pgc.Close()
+		chainSink = pgchain.NewSink(pgc, func(err error) {
+			log.Printf("worker: durable CHAIN append failed: %v", err)
+		})
+		log.Printf("worker: durable PostgreSQL CHAIN enabled")
+	}
+
 	// The materialiser is the single writer to the feature store; the
 	// reputation-builder deposits through it. The stream-processor writes
-	// block-state. The labeler turns settled outcomes into labels on
-	// outcomes.v1 — it is the only worker that also publishes. All fold from the
-	// bus, idempotent on event_id.
+	// block-state and appends provenance to the CHAIN. The labeler turns settled
+	// outcomes into labels on outcomes.v1 — it is the only worker that also
+	// publishes. All fold from the bus, idempotent on event_id.
 	mat := materialise.New(tokens, fstore, nil)
 	rep := reputation.New(mat, reputation.DefaultParams(), nil)
-	strm := stream.New(tokens)
+	strm := stream.New(tokens, chainSink)
 	lbl := labeler.New(b, labeler.DefaultParams())
 
 	var cancels []func()

@@ -4,6 +4,13 @@
 // the single writer of block-state, so the synchronous plane never has to
 // reconstruct a lien in the request path.
 //
+// It is also the single writer of the provenance CHAIN (the architecture diagram
+// assigns the CHAIN/VAULT write to this processor, not the decision service): the
+// decision service replies and announces decision.made carrying the full record's
+// fields; this processor reconstructs the domain.ProvenanceRecord off the clock
+// and appends it to the ledger. Every decision is recorded — ALLOW, STEP_UP and
+// BLOCK alike — so the audit trail is complete, not just the allowed slice.
+//
 // Two rules shape what it folds:
 //
 //   - Consumption advances ONLY on payment.captured — money that actually moved.
@@ -34,19 +41,32 @@ const Group = "stream-processor"
 // secondsPerDay is the width of the per-day consumption window.
 const secondsPerDay = 86400
 
-// Processor folds events into block-state. It owns no clock: it stamps windows
-// from each event's occurred_at, which keeps replay of historical events
-// deterministic.
+// ProvenanceSink appends one decision's record to the CHAIN, off the caller's
+// clock. Both the in-memory chain.Sink and the durable pgchain.Sink satisfy it
+// structurally (no import cycle), so the composition root plugs in whichever the
+// deployment uses. Emit is fire-and-forget by the sink contract; a durable sink
+// reports its own failures out of band rather than returning them here.
+type ProvenanceSink interface {
+	Emit(ctx context.Context, rec *domain.ProvenanceRecord)
+}
+
+// Processor folds events into block-state and records decisions on the CHAIN. It
+// owns no clock: it stamps windows from each event's occurred_at, which keeps
+// replay of historical events deterministic.
 type Processor struct {
 	tokens store.TokenStore
+	chain  ProvenanceSink // CHAIN writer; nil means this processor keeps no ledger
 
 	mu   sync.Mutex
 	seen map[string]struct{} // event_ids already folded (idempotency)
 }
 
-// New returns a stream-processor writing to the given token/block-state store.
-func New(tokens store.TokenStore) *Processor {
-	return &Processor{tokens: tokens, seen: make(map[string]struct{})}
+// New returns a stream-processor writing block-state to the given token store and,
+// when chainSink is non-nil, provenance to the CHAIN behind it. Pass a nil sink to
+// run without a ledger (nonce-spending and consumption still work); the composition
+// root supplies the in-memory or durable CHAIN as the deployment requires.
+func New(tokens store.TokenStore, chainSink ProvenanceSink) *Processor {
+	return &Processor{tokens: tokens, chain: chainSink, seen: make(map[string]struct{})}
 }
 
 // Register subscribes the processor to the bus under its consumer group and
@@ -115,12 +135,30 @@ func (p *Processor) foldCapture(ctx context.Context, ev domain.Event) error {
 	return p.tokens.PutBlockState(ctx, bs)
 }
 
-// foldDecision spends the nonce of an ALLOWED request so its replay is refused.
-// A non-ALLOW decision leaves no trace: the request may legitimately return.
+// foldDecision records the decision on the CHAIN and spends the nonce of an
+// ALLOWED request so its replay is refused. Every decision is recorded — ALLOW,
+// STEP_UP and BLOCK — but only an ALLOW spends a nonce; a non-ALLOW may legitimately
+// return with the same nonce.
+//
+// The fallible nonce write runs BEFORE the CHAIN append so that a store error
+// redelivers the event before any provenance is written, and a retry cannot append
+// a duplicate record. Same-event redelivery within the process is already caught by
+// Handle's seen-set, so the record is appended exactly once per evaluation here.
 func (p *Processor) foldDecision(ctx context.Context, ev domain.Event) error {
-	if d, _ := bus.PayloadString(ev, bus.PayloadDecision); d != bus.DecisionAllow {
-		return nil
+	if d, _ := bus.PayloadString(ev, bus.PayloadDecision); d == bus.DecisionAllow {
+		if err := p.spendNonce(ctx, ev); err != nil {
+			return err // leave the CHAIN untouched so the retry appends once
+		}
 	}
+	if p.chain != nil {
+		p.chain.Emit(ctx, bus.ProvenanceFromEvent(ev))
+	}
+	return nil
+}
+
+// spendNonce adds an ALLOWED request's nonce to the lien, so P1 refuses a replay.
+// It is a no-op when the nonce is already recorded.
+func (p *Processor) spendNonce(ctx context.Context, ev domain.Event) error {
 	nonce, ok := bus.PayloadString(ev, bus.PayloadNonce)
 	if !ok || nonce == "" {
 		return nil

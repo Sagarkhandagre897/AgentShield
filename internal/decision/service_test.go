@@ -17,23 +17,6 @@ import (
 
 const nowT int64 = 1_000_000
 
-// chanSink captures emitted provenance so tests can assert on it deterministically
-// (the receive synchronises with respond()'s emit goroutine).
-type chanSink struct{ ch chan *domain.ProvenanceRecord }
-
-func (c *chanSink) Emit(_ context.Context, r *domain.ProvenanceRecord) { c.ch <- r }
-
-func (c *chanSink) wait(t *testing.T) *domain.ProvenanceRecord {
-	t.Helper()
-	select {
-	case r := <-c.ch:
-		return r
-	case <-time.After(2 * time.Second):
-		t.Fatal("no provenance record emitted")
-		return nil
-	}
-}
-
 // order returns a baseline request that, against the seeded stores, is ALLOWed.
 func order() *pb.OrderContext {
 	return &pb.OrderContext{
@@ -90,23 +73,23 @@ func seed(t *testing.T) (*memory.TokenStore, *memory.PolicyStore, *memory.Featur
 	return ts, ps, fs
 }
 
-func newService(ts store.TokenStore, ps store.PolicyStore, fs store.FeatureStore, identity string) (*Service, *chanSink) {
-	sink := &chanSink{ch: make(chan *domain.ProvenanceRecord, 8)}
+func newService(ts store.TokenStore, ps store.PolicyStore, fs store.FeatureStore, identity string) (*Service, *chanPublisher) {
+	pub := &chanPublisher{ch: make(chan domain.Event, 8)}
 	svc := New(Config{
 		Tokens:   ts,
 		Policies: ps,
 		Features: features.NewReader(fs, features.DefaultStalenessBudgetSeconds),
 		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
-		Sink:     sink,
+		Events:   pub,
 		Identify: func(context.Context) string { return identity },
 		Now:      func() int64 { return nowT },
 	})
-	return svc, sink
+	return svc, pub
 }
 
 func TestEvaluateAllow(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, sink := newService(ts, ps, fs, "caller_1")
+	svc, pub := newService(ts, ps, fs, "caller_1")
 
 	v, err := svc.Evaluate(context.Background(), order())
 	if err != nil {
@@ -118,15 +101,18 @@ func TestEvaluateAllow(t *testing.T) {
 	if v.Retryable {
 		t.Fatalf("an ALLOW is not retryable")
 	}
-	rec := sink.wait(t)
-	if rec.EvaluationID != "eval_1" || rec.Decision != "ANSWER_ALLOW" || rec.PolicyVersion != 3 {
+	rec := pub.waitRecord(t)
+	if rec.EvaluationID != "eval_1" || rec.Decision != bus.DecisionAllow || rec.PolicyVersion != 3 {
 		t.Fatalf("provenance mismatch: %+v", rec)
+	}
+	if rec.RequestDigest == "" {
+		t.Fatalf("the CHAIN record must carry a request digest")
 	}
 }
 
 func TestEvaluateBlocksReplay(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, sink := newService(ts, ps, fs, "caller_1")
+	svc, pub := newService(ts, ps, fs, "caller_1")
 
 	req := order()
 	req.Nonce = "nonce_old" // already in the lien
@@ -138,14 +124,14 @@ func TestEvaluateBlocksReplay(t *testing.T) {
 	if v.Retryable {
 		t.Fatalf("a block is never retryable")
 	}
-	if rec := sink.wait(t); rec.PredicateFailed != "P1" {
+	if rec := pub.waitRecord(t); rec.PredicateFailed != "P1" {
 		t.Fatalf("provenance should record P1, got %q", rec.PredicateFailed)
 	}
 }
 
 func TestEvaluateStepsUpOnScope(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, sink := newService(ts, ps, fs, "caller_1")
+	svc, pub := newService(ts, ps, fs, "caller_1")
 
 	req := order()
 	req.AmountPaise = 250_000 // over the 200,000 per-debit cap
@@ -157,20 +143,20 @@ func TestEvaluateStepsUpOnScope(t *testing.T) {
 	if !v.Retryable {
 		t.Fatalf("a step-up is retryable")
 	}
-	if rec := sink.wait(t); rec.PredicateFailed != "P2" {
+	if rec := pub.waitRecord(t); rec.PredicateFailed != "P2" {
 		t.Fatalf("provenance should record P2, got %q", rec.PredicateFailed)
 	}
 }
 
 func TestEvaluateBlocksUnauthenticated(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, sink := newService(ts, ps, fs, "") // no caller identity
+	svc, pub := newService(ts, ps, fs, "") // no caller identity
 
 	v, _ := svc.Evaluate(context.Background(), order())
 	if v.Decision != pb.Answer_ANSWER_BLOCK || v.Code != pb.Code_BLOCKED_IDENTITY {
 		t.Fatalf("want BLOCK/BLOCKED_IDENTITY, got %s/%s", v.Decision, v.Code)
 	}
-	if rec := sink.wait(t); rec.PredicateFailed != "P5" {
+	if rec := pub.waitRecord(t); rec.PredicateFailed != "P5" {
 		t.Fatalf("provenance should record P5, got %q", rec.PredicateFailed)
 	}
 }
@@ -178,13 +164,13 @@ func TestEvaluateBlocksUnauthenticated(t *testing.T) {
 func TestEvaluateFailsClosedOnMissingFeatures(t *testing.T) {
 	ts, ps, _ := seed(t)
 	// An empty feature store: the spine passes, but every figure is missing.
-	svc, sink := newService(ts, ps, memory.NewFeatureStore(), "caller_1")
+	svc, pub := newService(ts, ps, memory.NewFeatureStore(), "caller_1")
 
 	v, _ := svc.Evaluate(context.Background(), order())
 	if v.Decision != pb.Answer_ANSWER_STEP_UP || v.Code != pb.Code_STEPUP_FAILCLOSED {
 		t.Fatalf("missing features must fail closed to STEP_UP/STEPUP_FAILCLOSED, got %s/%s", v.Decision, v.Code)
 	}
-	if rec := sink.wait(t); rec.Decision != "ANSWER_STEP_UP" {
+	if rec := pub.waitRecord(t); rec.Decision != bus.DecisionStepUp {
 		t.Fatalf("provenance mismatch: %+v", rec)
 	}
 }
@@ -204,18 +190,18 @@ func (erroringTokens) PutBlockState(context.Context, *domain.BlockState) error {
 
 func TestEvaluateFailsClosedOnTokenStoreError(t *testing.T) {
 	_, ps, fs := seed(t)
-	svc, sink := newService(erroringTokens{}, ps, fs, "caller_1")
+	svc, pub := newService(erroringTokens{}, ps, fs, "caller_1")
 
 	v, _ := svc.Evaluate(context.Background(), order())
 	if v.Decision != pb.Answer_ANSWER_STEP_UP || v.Code != pb.Code_STEPUP_FAILCLOSED {
 		t.Fatalf("token store error must fail closed, got %s/%s", v.Decision, v.Code)
 	}
-	sink.wait(t) // provenance is still emitted for the fail-closed decision
+	pub.waitRecord(t) // provenance is still announced for the fail-closed decision
 }
 
 func TestEvaluateCriticalToolFloor(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, sink := newService(ts, ps, fs, "caller_1")
+	svc, pub := newService(ts, ps, fs, "caller_1")
 
 	req := order()
 	req.ToolRisk = pb.ToolRisk_TOOL_RISK_CRITICAL // would otherwise ALLOW
@@ -224,7 +210,7 @@ func TestEvaluateCriticalToolFloor(t *testing.T) {
 	if v.Decision != pb.Answer_ANSWER_STEP_UP || v.Code != pb.Code_STEPUP_RISK {
 		t.Fatalf("critical tool risk must floor an ALLOW to STEP_UP/STEPUP_RISK, got %s/%s", v.Decision, v.Code)
 	}
-	sink.wait(t)
+	pub.waitRecord(t)
 }
 
 func TestConsumptionFrac(t *testing.T) {
@@ -261,18 +247,12 @@ func (c *chanPublisher) wait(t *testing.T) domain.Event {
 	}
 }
 
-func newPublishingService(ts store.TokenStore, ps store.PolicyStore, fs store.FeatureStore, identity string) (*Service, *chanPublisher) {
-	pub := &chanPublisher{ch: make(chan domain.Event, 8)}
-	svc := New(Config{
-		Tokens:   ts,
-		Policies: ps,
-		Features: features.NewReader(fs, features.DefaultStalenessBudgetSeconds),
-		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
-		Events:   pub,
-		Identify: func(context.Context) string { return identity },
-		Now:      func() int64 { return nowT },
-	})
-	return svc, pub
+// waitRecord reconstructs the provenance record the stream-processor would
+// rebuild from the decision.made event — the CHAIN write now lives there, not in
+// the decision service, so provenance is asserted off the published event.
+func (c *chanPublisher) waitRecord(t *testing.T) *domain.ProvenanceRecord {
+	t.Helper()
+	return bus.ProvenanceFromEvent(c.wait(t))
 }
 
 // TestEvaluatePublishesDecisionMade: an ALLOW announces itself on the bus with
@@ -280,7 +260,7 @@ func newPublishingService(ts store.TokenStore, ps store.PolicyStore, fs store.Fe
 // evaluation_id so a redelivery folds once and partitioned by token_id.
 func TestEvaluatePublishesDecisionMade(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, pub := newPublishingService(ts, ps, fs, "caller_1")
+	svc, pub := newService(ts, ps, fs, "caller_1")
 
 	v, _ := svc.Evaluate(context.Background(), order())
 	if v.Decision != pb.Answer_ANSWER_ALLOW {
@@ -317,7 +297,7 @@ func TestEvaluatePublishesDecisionMade(t *testing.T) {
 // nonce.
 func TestEvaluatePublishesOnBlock(t *testing.T) {
 	ts, ps, fs := seed(t)
-	svc, pub := newPublishingService(ts, ps, fs, "caller_1")
+	svc, pub := newService(ts, ps, fs, "caller_1")
 
 	req := order()
 	req.Nonce = "nonce_old" // already in the lien → P1 BLOCK

@@ -9,18 +9,21 @@
 //  4. readFeatures — one keyed multi-get, with staleness
 //  5. scoreEnsemble— fold the figures into one calibrated probability
 //  6. decide       — expected loss vs interruption cost
-//  7. respond      — reply to the caller, THEN emit provenance off the clock
+//  7. respond      — reply to the caller, THEN announce the decision off the clock
 //
 // A refusing predicate settles the request at stage 3 and stages 4-6 are
 // skipped. Any backend error that means we cannot know what we must know fails
 // closed to a STEP-UP. The caller's verdict is lean by design — no score, band
-// or threshold — so the score surface cannot be probed; the full record goes to
-// the CHAIN after the reply.
+// or threshold — so the score surface cannot be probed; the full record travels
+// on decision.made and the stream-processor appends it to the CHAIN after the reply.
 package decision
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc/credentials"
@@ -35,23 +38,13 @@ import (
 	"github.com/Sagarkhandagre897/AgentShield/internal/store"
 )
 
-// ProvenanceSink receives the record built for each decision, after the reply.
-// The in-memory build hands it a NopSink; the asynchronous plane plugs a durable
-// bus/CHAIN writer behind the same interface. Emit runs off the caller's clock.
-type ProvenanceSink interface {
-	Emit(ctx context.Context, rec *domain.ProvenanceRecord)
-}
-
-// NopSink discards provenance. Default when no sink is configured.
-type NopSink struct{}
-
-// Emit does nothing.
-func (NopSink) Emit(context.Context, *domain.ProvenanceRecord) {}
-
 // EventPublisher publishes one decision.made event per evaluation to the
 // asynchronous plane, after the reply. bus.Bus satisfies it; the in-memory build
 // hands a NopPublisher. This is the bus-down meeting point of the two planes: the
-// clock announces the decision and never reads back.
+// clock announces the decision — carrying the full provenance record's fields —
+// and never reads back. The stream-processor is the one that appends it to the
+// CHAIN off the clock; this service never touches the ledger (per the architecture
+// diagram).
 type EventPublisher interface {
 	Publish(ctx context.Context, ev domain.Event) error
 }
@@ -63,16 +56,15 @@ type NopPublisher struct{}
 func (NopPublisher) Publish(context.Context, domain.Event) error { return nil }
 
 // Config assembles a Service. Only the stores and feature reader are required;
-// the rest default to the standard scorer, a no-op sink, mTLS identity and the
-// wall clock.
+// the rest default to the standard scorer, a no-op publisher, mTLS identity and
+// the wall clock.
 type Config struct {
 	Tokens   store.TokenStore
 	Policies store.PolicyStore
 	Features *features.Reader
 	Scorer   score.Scorer
 	Params   score.Params
-	Sink     ProvenanceSink
-	Events   EventPublisher                   // decision.made goes here, after the reply
+	Events   EventPublisher                   // decision.made (carrying provenance) goes here, after the reply
 	Identify func(ctx context.Context) string // caller identity from the transport
 	Now      func() int64                     // epoch seconds
 }
@@ -85,7 +77,6 @@ type Service struct {
 	features *features.Reader
 	scorer   score.Scorer
 	params   score.Params
-	sink     ProvenanceSink
 	events   EventPublisher
 	identify func(ctx context.Context) string
 	now      func() int64
@@ -98,9 +89,6 @@ func New(cfg Config) *Service {
 	}
 	if cfg.Params.InterruptionCostPaise == 0 {
 		cfg.Params.InterruptionCostPaise = score.DefaultInterruptionCostPaise
-	}
-	if cfg.Sink == nil {
-		cfg.Sink = NopSink{}
 	}
 	if cfg.Events == nil {
 		cfg.Events = NopPublisher{}
@@ -117,7 +105,6 @@ func New(cfg Config) *Service {
 		features: cfg.Features,
 		scorer:   cfg.Scorer,
 		params:   cfg.Params,
-		sink:     cfg.Sink,
 		events:   cfg.Events,
 		identify: cfg.Identify,
 		now:      cfg.Now,
@@ -190,12 +177,13 @@ func (s *Service) Evaluate(ctx context.Context, in *pb.OrderContext) (*pb.Verdic
 	return s.respond(ctx, in, now, d.Answer, d.Code, "", policyVersion), nil
 }
 
-// respond builds the lean caller verdict and, off the caller's clock, hands the
-// full provenance record to the sink and announces the decision on the bus. Both
-// side effects are derived from the verdict being returned, so provenance and the
-// event always reflect what the caller saw. This is the reply-then-emit seam and
-// the two planes' bus-down meeting point: we answer first, then tell the async
-// plane, and never read back.
+// respond builds the lean caller verdict and, off the caller's clock, announces
+// the decision on the bus carrying the full provenance record's fields. The event
+// is derived from the verdict being returned, so what the async plane records
+// always reflects what the caller saw. This is the reply-then-emit seam and the
+// two planes' bus-down meeting point: we answer first, then tell the async plane,
+// and never read back. The stream-processor — not this service — appends the record
+// to the CHAIN (the architecture diagram assigns the ledger write there).
 func (s *Service) respond(ctx context.Context, in *pb.OrderContext, now int64, ans pb.Answer, code pb.Code, predicateFailed string, policyVersion int) *pb.Verdict {
 	v := &pb.Verdict{
 		EvaluationId: in.GetEvaluationId(),
@@ -204,9 +192,14 @@ func (s *Service) respond(ctx context.Context, in *pb.OrderContext, now int64, a
 		Retryable:    ans == pb.Answer_ANSWER_STEP_UP, // a step-up can be re-confirmed and retried; a block cannot
 	}
 
+	// The record's fields ride the event: evaluation_id / decision / ts on the
+	// envelope, the rest via WithProvenance. request_digest is a fingerprint of the
+	// order, so the raw request never travels the bus — only enough to bind the
+	// audit record to what was asked. The stream-processor rebuilds and appends it.
 	rec := &domain.ProvenanceRecord{
 		EvaluationID:    in.GetEvaluationId(),
-		Decision:        ans.String(),
+		RequestDigest:   requestDigest(in),
+		Decision:        answerString(ans),
 		Code:            code.String(),
 		PredicateFailed: predicateFailed,
 		PolicyVersion:   policyVersion,
@@ -214,19 +207,42 @@ func (s *Service) respond(ctx context.Context, in *pb.OrderContext, now int64, a
 	}
 	// The event_id is the evaluation_id: exactly one decision.made per evaluation,
 	// so a redelivery folds once. The stream-processor spends the nonce only when
-	// the decision was an ALLOW.
-	ev := bus.DecisionMadeEvent(in.GetEvaluationId(), in.GetTokenId(), now, answerString(ans), in.GetNonce(), in.GetAmountPaise())
+	// the decision was an ALLOW, and records every decision on the CHAIN.
+	ev := bus.WithProvenance(
+		bus.DecisionMadeEvent(in.GetEvaluationId(), in.GetTokenId(), now, answerString(ans), in.GetNonce(), in.GetAmountPaise()),
+		rec,
+	)
 
-	// Reply-then-emit: both writes outlive the request, so detach cancellation
-	// (keep any values) and run off the critical path. Provenance is recorded
-	// before the decision is announced.
+	// Reply-then-emit: the publish outlives the request, so detach cancellation
+	// (keep any values) and run off the critical path.
 	go func() {
 		dctx := context.WithoutCancel(ctx)
-		s.sink.Emit(dctx, rec)
 		_ = s.events.Publish(dctx, ev)
 	}()
 
 	return v
+}
+
+// requestDigest is the SHA-256 fingerprint of an order's identifying content, in a
+// fixed field order. It binds a CHAIN record to exactly what was asked without ever
+// putting the raw request on the bus — only this digest travels.
+func requestDigest(in *pb.OrderContext) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%d\x1f%s\x1f%s\x1f%d\x1f%s\x1f%d",
+		in.GetEvaluationId(),
+		in.GetTokenId(),
+		in.GetCustomerId(),
+		in.GetAgentId(),
+		in.GetMerchantId(),
+		in.GetSessionId(),
+		in.GetAmountPaise(),
+		in.GetCartHash(),
+		in.GetEnvelopeDigest(),
+		int32(in.GetToolRisk()),
+		in.GetNonce(),
+		in.GetTs(),
+	)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // answerString maps a verdict answer onto the decision string the bus carries,

@@ -3,6 +3,7 @@ package stream_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func hasNonce(bs *domain.BlockState, nonce string) bool {
 
 func TestCaptureAdvancesConsumptionAndSpendsNonce(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	ev := bus.PaymentCapturedEvent("e1", tok, day1TS, 50000, "n1")
 	if err := p.Handle(context.Background(), ev); err != nil {
@@ -62,7 +63,7 @@ func TestCaptureAdvancesConsumptionAndSpendsNonce(t *testing.T) {
 
 func TestCapturesAccumulateWithinDay(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	p.Handle(context.Background(), bus.PaymentCapturedEvent("e1", tok, day1TS, 30000, "n1"))
 	p.Handle(context.Background(), bus.PaymentCapturedEvent("e2", tok, day1TS+10, 20000, "n2"))
@@ -78,7 +79,7 @@ func TestCapturesAccumulateWithinDay(t *testing.T) {
 
 func TestDayRolloverResetsTodayNotTotal(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	p.Handle(context.Background(), bus.PaymentCapturedEvent("e1", tok, day1TS, 40000, "n1"))
 	p.Handle(context.Background(), bus.PaymentCapturedEvent("e2", tok, day2TS, 15000, "n2"))
@@ -94,7 +95,7 @@ func TestDayRolloverResetsTodayNotTotal(t *testing.T) {
 
 func TestDecisionAllowSpendsNonce(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	ev := bus.DecisionMadeEvent("e1", tok, day1TS, bus.DecisionAllow, "n1", 50000)
 	if err := p.Handle(context.Background(), ev); err != nil {
@@ -112,7 +113,7 @@ func TestDecisionAllowSpendsNonce(t *testing.T) {
 
 func TestDecisionStepUpDoesNotSpendNonce(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	ev := bus.DecisionMadeEvent("e1", tok, day1TS, bus.DecisionStepUp, "n1", 50000)
 	if err := p.Handle(context.Background(), ev); err != nil {
@@ -130,7 +131,7 @@ func TestDecisionStepUpDoesNotSpendNonce(t *testing.T) {
 // captured event twice consumes once.
 func TestIdempotentRedelivery(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	ev := bus.PaymentCapturedEvent("e1", tok, day1TS, 50000, "n1")
 	p.Handle(context.Background(), ev)
@@ -163,7 +164,7 @@ func (f *flakyStore) PutBlockState(ctx context.Context, s *domain.BlockState) er
 // double-applied when it finally succeeds.
 func TestStoreErrorIsRetryable(t *testing.T) {
 	ts := &flakyStore{TokenStore: memory.NewTokenStore(), failsLeft: 1}
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	ev := bus.PaymentCapturedEvent("e1", tok, day1TS, 50000, "n1")
 	if err := p.Handle(context.Background(), ev); err == nil {
@@ -183,7 +184,7 @@ func TestStoreErrorIsRetryable(t *testing.T) {
 // and lets a published capture flow through Handle.
 func TestThroughBus(t *testing.T) {
 	ts := memory.NewTokenStore()
-	p := stream.New(ts)
+	p := stream.New(ts, nil)
 
 	b := busmem.New(3)
 	defer b.Close()
@@ -204,5 +205,87 @@ func TestThroughBus(t *testing.T) {
 			t.Fatal("block-state did not converge through the bus in time")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// recordingSink captures the provenance records the processor appends, so tests
+// can assert on the CHAIN the stream-processor now owns.
+type recordingSink struct {
+	mu   sync.Mutex
+	recs []*domain.ProvenanceRecord
+}
+
+func (s *recordingSink) Emit(_ context.Context, r *domain.ProvenanceRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs = append(s.recs, r)
+}
+
+func (s *recordingSink) all() []*domain.ProvenanceRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*domain.ProvenanceRecord, len(s.recs))
+	copy(out, s.recs)
+	return out
+}
+
+// TestEveryDecisionIsRecordedOnChain: the stream-processor is the CHAIN's writer,
+// and it records every decision — ALLOW, STEP_UP and BLOCK — rebuilding the full
+// record from the fields the decision.made event carried.
+func TestEveryDecisionIsRecordedOnChain(t *testing.T) {
+	ts := memory.NewTokenStore()
+	sink := &recordingSink{}
+	p := stream.New(ts, sink)
+
+	for _, tc := range []struct {
+		id, decision, code, pred string
+	}{
+		{"e_allow", bus.DecisionAllow, "OK_ALLOW", ""},
+		{"e_stepup", bus.DecisionStepUp, "STEPUP_SCOPE", "P2"},
+		{"e_block", bus.DecisionBlock, "BLOCKED_DUPLICATE", "P1"},
+	} {
+		rec := &domain.ProvenanceRecord{
+			EvaluationID: tc.id, Decision: tc.decision, Code: tc.code,
+			PredicateFailed: tc.pred, RequestDigest: "rd_" + tc.id, PolicyVersion: 3,
+		}
+		ev := bus.WithProvenance(
+			bus.DecisionMadeEvent(tc.id, tok, day1TS, tc.decision, "n_"+tc.id, 50000),
+			rec,
+		)
+		if err := p.Handle(context.Background(), ev); err != nil {
+			t.Fatalf("handle %s: %v", tc.id, err)
+		}
+	}
+
+	recs := sink.all()
+	if len(recs) != 3 {
+		t.Fatalf("every decision must be recorded on the CHAIN: got %d, want 3", len(recs))
+	}
+	// Spot-check the full reconstruction of the STEP_UP record from its event.
+	got := recs[1]
+	if got.EvaluationID != "e_stepup" || got.Decision != bus.DecisionStepUp ||
+		got.Code != "STEPUP_SCOPE" || got.PredicateFailed != "P2" ||
+		got.RequestDigest != "rd_e_stepup" || got.PolicyVersion != 3 || got.TS != day1TS {
+		t.Fatalf("record rebuilt from event is wrong: %+v", got)
+	}
+}
+
+// TestChainRecordsOncePerEvaluation: an at-least-once redelivery of the same
+// decision.made must append exactly one CHAIN record — the seen-set that dedupes
+// block-state folds protects the ledger write too.
+func TestChainRecordsOncePerEvaluation(t *testing.T) {
+	ts := memory.NewTokenStore()
+	sink := &recordingSink{}
+	p := stream.New(ts, sink)
+
+	ev := bus.WithProvenance(
+		bus.DecisionMadeEvent("e1", tok, day1TS, bus.DecisionAllow, "n1", 50000),
+		&domain.ProvenanceRecord{EvaluationID: "e1", Decision: bus.DecisionAllow, Code: "OK_ALLOW"},
+	)
+	p.Handle(context.Background(), ev)
+	p.Handle(context.Background(), ev) // redelivery of the identical event
+
+	if recs := sink.all(); len(recs) != 1 {
+		t.Fatalf("redelivery must record once on the CHAIN: got %d, want 1", len(recs))
 	}
 }
