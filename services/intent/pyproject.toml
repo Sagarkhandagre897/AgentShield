@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentshield-intent"
+version = "0.1.0"
+description = "AgentShield intent-alignment engine (System Design §12) — seal the intent envelope once per session, then judge each debit's soft divergence from it off the clock."
+requires-python = ">=3.10"
+# The envelope, the digest and the divergence arithmetic are pure stdlib and
+# always importable. The sentence-transformer (all-MiniLM-L6-v2) is imported
+# lazily so the engine and its tests run without torch installed, falling back to
+# a deterministic hashing embedder — a cold-start stand-in, exactly as the
+# behaviour engine's Layer-1 aggregate stands in for its calibrated model.
+dependencies = [
+    "numpy>=1.26",
+    "sentence-transformers>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["agentshield_intent*"]
