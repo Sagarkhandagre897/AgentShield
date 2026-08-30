@@ -49,6 +49,12 @@ func hashRecord(r *domain.ProvenanceRecord) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// HashRecord is the exported tamper-evidence definition: the SHA-256 over a
+// record's linked fields (PrevHash included). A durable backing — the PostgreSQL
+// adapter — reuses THIS function so its links and its Verify agree byte-for-byte
+// with the in-memory ledger; there must only ever be one definition of the hash.
+func HashRecord(r *domain.ProvenanceRecord) string { return hashRecord(r) }
+
 // Chain is an in-memory append-only ledger.
 type Chain struct {
 	mu       sync.Mutex

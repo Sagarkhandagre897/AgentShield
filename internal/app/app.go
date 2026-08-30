@@ -53,6 +53,14 @@ type Config struct {
 	Policies store.PolicyStore  // durable policy store (default: in-memory)
 	Features store.FeatureStore // durable feature store (default: in-memory)
 	Bus      bus.Bus            // durable bus (default: in-memory)
+
+	// Sink, if non-nil, receives provenance in place of the in-process CHAIN.
+	// cmd/decision supplies the durable PostgreSQL ledger (internal/chain/postgres)
+	// here when POSTGRES_DSN is set, so the history survives a restart; left nil,
+	// New writes to the in-memory Chain it exposes on App.Chain. This gate is
+	// independent of the store/bus split — a single-process root can still keep a
+	// durable ledger.
+	Sink decision.ProvenanceSink
 }
 
 // App is the wired in-process system. The stores, bus and CHAIN are exported so a
@@ -139,14 +147,21 @@ func New(cfg Config) (*App, error) {
 		}
 	}
 
+	// Provenance sink: the durable PostgreSQL ledger when one was supplied, else
+	// the in-process CHAIN this root exposes on App.Chain.
+	var sink decision.ProvenanceSink = chain.NewSink(ledger)
+	if cfg.Sink != nil {
+		sink = cfg.Sink
+	}
+
 	a.Decision = decision.New(decision.Config{
 		Tokens:   tokens,
 		Policies: policies,
 		Features: features.NewReader(fstore, features.DefaultStalenessBudgetSeconds),
 		Scorer:   score.NewLinearScorer(score.DefaultWeights),
 		Params:   score.Params{InterruptionCostPaise: score.DefaultInterruptionCostPaise},
-		Sink:     chain.NewSink(ledger), // provenance, going down
-		Events:   b,                     // decision.made, going down (the bus meeting point)
+		Sink:     sink, // provenance, going down
+		Events:   b,    // decision.made, going down (the bus meeting point)
 		Identify: cfg.Identify,
 		Now:      now,
 	})

@@ -31,6 +31,7 @@ import (
 	pb "github.com/Sagarkhandagre897/AgentShield/gen/go/agentshield/v1"
 	"github.com/Sagarkhandagre897/AgentShield/internal/app"
 	kafkabus "github.com/Sagarkhandagre897/AgentShield/internal/bus/kafka"
+	pgchain "github.com/Sagarkhandagre897/AgentShield/internal/chain/postgres"
 	"github.com/Sagarkhandagre897/AgentShield/internal/decision"
 	redisstore "github.com/Sagarkhandagre897/AgentShield/internal/store/redis"
 )
@@ -130,6 +131,22 @@ func main() {
 		log.Fatalf("agentshield: backend setup failed: %v", err)
 	}
 	cfg.Identify = identify
+
+	// Provenance ledger: durable PostgreSQL CHAIN when POSTGRES_DSN is set (the
+	// history survives a restart and an auditor can walk it long after the reply),
+	// else the in-process append-only chain. Gated independently of the store/bus
+	// split — a single-process root can still keep a durable ledger.
+	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
+		pgc, err := pgchain.Open(context.Background(), dsn)
+		if err != nil {
+			log.Fatalf("agentshield: durable CHAIN setup failed: %v", err)
+		}
+		defer pgc.Close()
+		cfg.Sink = pgchain.NewSink(pgc, func(err error) {
+			log.Printf("agentshield: durable CHAIN append failed: %v", err)
+		})
+		log.Printf("agentshield: durable PostgreSQL CHAIN enabled")
+	}
 
 	system, err := app.New(cfg)
 	if err != nil {
