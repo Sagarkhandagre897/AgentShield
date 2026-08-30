@@ -26,6 +26,7 @@ const (
 	EventDecisionMade    = "decision.made"    // one per Evaluate, emitted after the reply
 	EventPaymentCaptured = "payment.captured" // money actually moved — the only source of truth for consumption
 	EventPaymentFailed   = "payment.failed"
+	EventPaymentDisputed = "payment.disputed" // chargeback/dispute — the strongest settled negative, arrives on settlement lag
 	EventTokenConfirmed  = "token.confirmed"
 	EventTokenCancelled  = "token.cancelled"
 )
@@ -38,6 +39,7 @@ const (
 	PayloadNonce       = "nonce"        // string
 	PayloadDecision    = "decision"     // string, one of the Decision* values
 	PayloadCustomerID  = "customer_id"  // string
+	PayloadAgentID     = "agent_id"     // string; who a settled outcome is attributed to (reputation)
 )
 
 // Decision payload values mirror the verdict answers as plain strings, so the
@@ -93,6 +95,31 @@ func PaymentFailedEvent(eventID, tokenID string, occurredAt int64, nonce string)
 		Source:     "webhook",
 		Payload:    map[string]any{PayloadNonce: nonce},
 	}
+}
+
+// PaymentDisputedEvent builds the event for a chargeback or dispute — the
+// strongest settled negative for reputation, and one that arrives late.
+func PaymentDisputedEvent(eventID, tokenID string, occurredAt int64, nonce string) domain.Event {
+	return domain.Event{
+		EventID:    eventID,
+		Type:       EventPaymentDisputed,
+		TokenID:    tokenID,
+		OccurredAt: occurredAt,
+		Source:     "webhook",
+		Payload:    map[string]any{PayloadNonce: nonce},
+	}
+}
+
+// WithAgent stamps the agent a settled outcome is attributed to; the
+// reputation-builder keys on it. The payment webhook sets it from the order
+// record. Other producers may leave it unset, and consumers that do not need it
+// (the stream-processor, the materialiser) ignore it.
+func WithAgent(ev domain.Event, agentID string) domain.Event {
+	if ev.Payload == nil {
+		ev.Payload = map[string]any{}
+	}
+	ev.Payload[PayloadAgentID] = agentID
+	return ev
 }
 
 // PayloadInt64 reads an integer payload value, normalising the int64 / int /
