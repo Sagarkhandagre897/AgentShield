@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentshield-graph"
+version = "0.1.0"
+description = "AgentShield graph engine (System Design §13) — a heterogeneous, time-aware entity graph, an inductive GraphSAGE model and a structural floor that deposit one network_risk per node off the clock."
+requires-python = ">=3.10"
+# The graph, the structural floor and label propagation are pure stdlib and always
+# importable. The learned GraphSAGE layer pulls torch + torch-geometric; they are
+# imported lazily so the structural layer and its tests run without the heavy
+# wheels installed, and the engine falls back to the floor when the model is
+# absent (the cold-start posture §13 describes).
+dependencies = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "torch>=2.2",
+    "torch-geometric>=2.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["agentshield_graph*"]
