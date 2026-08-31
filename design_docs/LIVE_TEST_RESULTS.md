@@ -154,4 +154,4 @@ start `cmd/worker` and `cmd/decision` in split-process mode, then run
 reproduce exactly on a clean slate.
 
 ---
-Prepared by Sagar Khandagre — Agentic security.
+Prepared by Sagar Khandagre.
