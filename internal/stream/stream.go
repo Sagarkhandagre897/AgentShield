@@ -13,7 +13,9 @@
 // audit trail is complete, not just the allowed slice. For the VAULT: an
 // envelope.sealed event carries a session's raw PII once, and this processor seals
 // each field into the encrypted, erasable store — the only worker that touches it,
-// and never on the clock.
+// and never on the clock. A later erasure.requested event (a DPDP right-to-erasure)
+// makes it crypto-shred that session, so the same single writer both seals and
+// forgets the PII.
 //
 // Two rules shape what it folds:
 //
@@ -54,14 +56,18 @@ type ProvenanceSink interface {
 	Emit(ctx context.Context, rec *domain.ProvenanceRecord)
 }
 
-// VaultSink seals one field of a session's PII into the encrypted VAULT. vault.Sink
-// satisfies it structurally (no import cycle), so the composition root plugs in the
-// durable store. Unlike the CHAIN's Emit, Seal RETURNS its error: sealing is the
-// whole purpose of the envelope.sealed fold, so a transient failure must redeliver
-// rather than be dropped. field is the wire field name (bus.PayloadRawInstruction /
-// bus.PayloadContact); the sink maps it to a vault.Field.
+// VaultSink seals one field of a session's PII into the encrypted VAULT and erases
+// a session on a DPDP request. vault.Sink satisfies it structurally (no import
+// cycle), so the composition root plugs in the durable store. Unlike the CHAIN's
+// Emit, both Seal and Erase RETURN their error: sealing is the whole purpose of the
+// envelope.sealed fold and erasure is a compliance obligation, so a transient
+// failure must redeliver rather than be dropped. field is the wire field name
+// (bus.PayloadRawInstruction / bus.PayloadContact); the sink maps it to a
+// vault.Field. Erase removes every row for the session and shreds its data key
+// (crypto-shred); it is idempotent, so a redelivered erasure is safe.
 type VaultSink interface {
 	Seal(ctx context.Context, sessionID, field, plaintext string) error
+	Erase(ctx context.Context, sessionID string) error
 }
 
 // Processor folds events into block-state and records decisions on the CHAIN. It
@@ -124,6 +130,8 @@ func (p *Processor) apply(ctx context.Context, ev domain.Event) error {
 		return p.foldDecision(ctx, ev)
 	case bus.EventEnvelopeSealed:
 		return p.foldEnvelopeSealed(ctx, ev)
+	case bus.EventErasureRequested:
+		return p.foldErasureRequested(ctx, ev)
 	default:
 		// payment.failed moved no money; token.* is another projection's job.
 		return nil
@@ -200,6 +208,28 @@ func (p *Processor) foldEnvelopeSealed(ctx context.Context, ev domain.Event) err
 		}
 	}
 	return nil
+}
+
+// foldErasureRequested honours a DPDP right-to-erasure request: it erases the
+// session's PII from the VAULT — deleting every row AND shredding the session's
+// data key, so even a backup that still holds the ciphertext is unrecoverable. It
+// is the counterpart of foldEnvelopeSealed and the only other write this processor
+// makes to the VAULT, keeping it the single VAULT writer.
+//
+// Like a seal, an erase error is RETURNED so the bus redelivers: a deletion that
+// silently failed would leave PII the data principal asked us to forget, so it must
+// complete. vault.Erase is idempotent (a re-run deletes nothing and re-shreds the
+// already-gone key), so redelivery is safe. With no VAULT configured (single-process
+// without Postgres) there is no PII store to erase and the event is a no-op.
+func (p *Processor) foldErasureRequested(ctx context.Context, ev domain.Event) error {
+	if p.vault == nil {
+		return nil // no PII store in this deployment; nothing to erase
+	}
+	sessionID, _ := bus.PayloadString(ev, bus.PayloadSessionID)
+	if sessionID == "" {
+		return nil // no VAULT key; nothing to erase against
+	}
+	return p.vault.Erase(ctx, sessionID)
 }
 
 // spendNonce adds an ALLOWED request's nonce to the lien, so P1 refuses a replay.

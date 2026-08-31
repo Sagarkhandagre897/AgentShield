@@ -239,3 +239,26 @@ func TestSinkSealsThroughWireFields(t *testing.T) {
 	}
 }
 
+// TestSinkErasesThroughSeam exercises the other half of the stream-facing seam:
+// Sink.Erase crypto-shreds a session (deletes its rows, shreds its key), discarding
+// the row count the fold does not need, so a later Reveal reports the row gone. It is
+// the DPDP-erasure path the stream-processor drives on an erasure.requested event.
+func TestSinkErasesThroughSeam(t *testing.T) {
+	ctx := context.Background()
+	v := newVault(t)
+	s := NewSink(v)
+
+	if err := s.Seal(ctx, "sess1", string(FieldInstruction), "refund order 42"); err != nil {
+		t.Fatalf("sink seal: %v", err)
+	}
+	if err := s.Erase(ctx, "sess1"); err != nil {
+		t.Fatalf("sink erase: %v", err)
+	}
+	if _, err := v.Reveal(ctx, "sess1", FieldInstruction); err != ErrNotFound {
+		t.Fatalf("after erase, reveal err = %v, want ErrNotFound", err)
+	}
+	// Erasing a session with nothing sealed is a harmless no-op.
+	if err := s.Erase(ctx, "never-sealed"); err != nil {
+		t.Fatalf("erasing an empty session must be a no-op, got: %v", err)
+	}
+}

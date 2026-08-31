@@ -292,5 +292,12 @@ func (s *Sink) Seal(ctx context.Context, sessionID, field, plaintext string) err
 	return s.v.Seal(ctx, sessionID, Field(field), plaintext)
 }
 
-
-
+// Erase crypto-shreds a session on a DPDP request: it deletes every row for the
+// session and drops its data key from the ring. It discards Erase's row count — the
+// stream-processor's fold cares only whether the deletion committed — and returns
+// the error so a transient failure redelivers rather than leaving PII behind. Erasing
+// a session with nothing sealed is a harmless no-op (zero rows, nothing to shred).
+func (s *Sink) Erase(ctx context.Context, sessionID string) error {
+	_, err := s.v.Erase(ctx, sessionID)
+	return err
+}

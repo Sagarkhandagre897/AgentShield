@@ -27,6 +27,10 @@ EVENT_TOKEN_CANCELLED = "token.cancelled"
 # for the encrypted VAULT via its own topic (vault.v1). Only the Go stream-processor
 # (the single VAULT writer) consumes it.
 EVENT_ENVELOPE_SEALED = "envelope.sealed"
+# A DPDP right-to-erasure request: carries no PII, only the session_id to crypto-
+# shred. It rides the same vault.v1 channel and is consumed only by the Go stream-
+# processor, which deletes the session's rows and shreds its key off the clock.
+EVENT_ERASURE_REQUESTED = "erasure.requested"
 EVENT_FEATURE_BEHAVIOUR = "feature.behaviour.deposited"
 EVENT_FEATURE_INTENT = "feature.intent.deposited"
 EVENT_FEATURE_NETWORK = "feature.network.deposited"
@@ -186,6 +190,8 @@ def topic_for(event_type: str) -> str | None:
     if event_type in (EVENT_TOKEN_CONFIRMED, EVENT_TOKEN_CANCELLED):
         return TOPIC_TOKENS
     if event_type == EVENT_ENVELOPE_SEALED:
+        return TOPIC_VAULT
+    if event_type == EVENT_ERASURE_REQUESTED:
         return TOPIC_VAULT
     if event_type in (EVENT_FEATURE_BEHAVIOUR, EVENT_FEATURE_INTENT, EVENT_FEATURE_NETWORK):
         return TOPIC_FEATURES

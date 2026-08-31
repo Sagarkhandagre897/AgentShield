@@ -57,7 +57,7 @@ func topicFor(eventType string) (string, bool) {
 		return TopicFeatures, true
 	case bus.EventOutcomeLabeled:
 		return TopicOutcomes, true
-	case bus.EventEnvelopeSealed:
+	case bus.EventEnvelopeSealed, bus.EventErasureRequested:
 		return TopicVault, true
 	default:
 		return "", false

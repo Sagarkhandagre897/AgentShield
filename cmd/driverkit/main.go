@@ -255,6 +255,16 @@ func (k *kit) handle(req request) response {
 		}
 		resp.OK = true
 
+	case "erase_session":
+		// A DPDP right-to-erasure request → vault.v1. It carries no PII, only the
+		// session_id to crypto-shred; the stream-processor deletes the rows and
+		// shreds the key off the clock. token_id keys it after that session's seals.
+		ev := bus.ErasureRequestedEvent(req.EventID, req.TokenID, req.SessionID, req.OccurredAt)
+		if err := k.events.Publish(k.ctx, ev); err != nil {
+			return fail(req.Op, err)
+		}
+		resp.OK = true
+
 	case "evaluate":
 		if req.Order == nil {
 			return fail(req.Op, errors.New("evaluate: missing order"))

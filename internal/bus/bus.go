@@ -39,6 +39,18 @@ const (
 	// It has its own topic (vault.v1) to keep raw PII off the analytic topics.
 	EventEnvelopeSealed = "envelope.sealed"
 
+	// EventErasureRequested is a DPDP right-to-erasure request for a session's
+	// sealed PII (§9). It carries NO plaintext — only the session_id whose rows the
+	// VAULT must delete and whose data key it must shred (crypto-shredding, which is
+	// what makes the deletion real: a backup that still holds the ciphertext becomes
+	// undecryptable once the key is gone). It rides the same vault.v1 channel as
+	// envelope.sealed and is keyed on the mandate's token_id, so it folds in order
+	// AFTER that session's seals on the one partition — a late seal can never
+	// resurrect erased PII behind it. The stream-processor (the single VAULT writer)
+	// is the sole consumer; erasure is an off-clock operation, never on the request
+	// path. An operator/console originates it (cmd/dpdp-erase); nothing else does.
+	EventErasureRequested = "erasure.requested"
+
 	// EventOutcomeLabeled is the labeler's output on outcomes.v1 (§6). It is the
 	// ONLY event that carries a training label, and it is emitted off the clock
 	// by the labeler, which distils the settled payment/token lifecycle into one
@@ -94,11 +106,11 @@ const (
 	// / OccurredAt); these are what remains. request_digest is a hash of the order
 	// computed on the clock, so the raw request never travels the bus — only its
 	// fingerprint, enough to bind the audit record to what was asked.
-	PayloadCode           = "code"            // string; the pb.Code verdict reason
+	PayloadCode            = "code"             // string; the pb.Code verdict reason
 	PayloadPredicateFailed = "predicate_failed" // string; which of P1-P6 refused, if any
-	PayloadPolicyVersion  = "policy_version"  // int; the overlay version in force
-	PayloadRequestDigest  = "request_digest"  // string; SHA-256 fingerprint of the order
-	PayloadEvidenceDigest = "evidence_digest" // string; fingerprint of the evidence scored
+	PayloadPolicyVersion   = "policy_version"   // int; the overlay version in force
+	PayloadRequestDigest   = "request_digest"   // string; SHA-256 fingerprint of the order
+	PayloadEvidenceDigest  = "evidence_digest"  // string; fingerprint of the evidence scored
 
 	// Envelope-sealing payload keys — the raw PII an envelope.sealed event carries
 	// to the VAULT. session_id is the VAULT key (the store is keyed by session, not
@@ -213,6 +225,26 @@ func EnvelopeSealedEvent(eventID, tokenID, sessionID string, occurredAt int64, r
 			PayloadSessionID:      sessionID,
 			PayloadRawInstruction: rawInstruction,
 			PayloadContact:        contact,
+		},
+	}
+}
+
+// ErasureRequestedEvent builds a DPDP right-to-erasure request for a session's
+// sealed PII. sessionID is the VAULT key to erase (rows deleted, key shredded);
+// tokenID is the partition key, so the erasure lands in order after that mandate's
+// seals on the one partition. It carries NO plaintext — a deletion request names
+// what to forget, never the data itself. The stream-processor (the single VAULT
+// writer) is the sole consumer; the operator entrypoint (cmd/dpdp-erase) publishes
+// it off the clock.
+func ErasureRequestedEvent(eventID, tokenID, sessionID string, occurredAt int64) domain.Event {
+	return domain.Event{
+		EventID:    eventID,
+		Type:       EventErasureRequested,
+		TokenID:    tokenID,
+		OccurredAt: occurredAt,
+		Source:     "dpdp-erase",
+		Payload: map[string]any{
+			PayloadSessionID: sessionID,
 		},
 	}
 }

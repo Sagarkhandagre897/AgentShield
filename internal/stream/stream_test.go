@@ -295,11 +295,13 @@ func TestChainRecordsOncePerEvaluation(t *testing.T) {
 type sealedField struct{ sessionID, field, plaintext string }
 
 // recordingVaultSink is a test VaultSink. It records each non-empty seal (mirroring
-// the real sink, which skips an empty field so an absent contact writes no row), and
-// failsLeft>0 makes the next seals fail so the redelivery path can be exercised.
+// the real sink, which skips an empty field so an absent contact writes no row) and
+// each erased session, and failsLeft>0 makes the next seal/erase fail so the
+// redelivery path can be exercised.
 type recordingVaultSink struct {
 	mu        sync.Mutex
 	sealed    []sealedField
+	erased    []string
 	failsLeft int
 }
 
@@ -322,6 +324,25 @@ func (s *recordingVaultSink) all() []sealedField {
 	defer s.mu.Unlock()
 	out := make([]sealedField, len(s.sealed))
 	copy(out, s.sealed)
+	return out
+}
+
+func (s *recordingVaultSink) Erase(_ context.Context, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failsLeft > 0 {
+		s.failsLeft--
+		return errors.New("transient vault error")
+	}
+	s.erased = append(s.erased, sessionID)
+	return nil
+}
+
+func (s *recordingVaultSink) erasedAll() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.erased))
+	copy(out, s.erased)
 	return out
 }
 
@@ -406,5 +427,74 @@ func TestEnvelopeSealedNoopWithoutVault(t *testing.T) {
 	ev := bus.EnvelopeSealedEvent("e1", tok, "sess_1", day1TS, "hello", "x@y.z")
 	if err := p.Handle(context.Background(), ev); err != nil {
 		t.Fatalf("a sealing event with no VAULT must be a no-op, got: %v", err)
+	}
+}
+
+// TestErasureRequestErasesVault: the stream-processor is the VAULT's single writer,
+// and a DPDP erasure.requested event makes it crypto-shred the named session — the
+// counterpart of sealing, keyed by session_id.
+func TestErasureRequestErasesVault(t *testing.T) {
+	ts := memory.NewTokenStore()
+	vsink := &recordingVaultSink{}
+	p := stream.New(ts, nil, vsink)
+
+	ev := bus.ErasureRequestedEvent("e1", tok, "sess_1", day1TS)
+	if err := p.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	erased := vsink.erasedAll()
+	if len(erased) != 1 || erased[0] != "sess_1" {
+		t.Fatalf("erasure must shred exactly the requested session: %v", erased)
+	}
+}
+
+// TestErasureRequestSkipsEmptySession: with no session_id there is no VAULT key to
+// erase against, so the event is a harmless no-op rather than an error.
+func TestErasureRequestSkipsEmptySession(t *testing.T) {
+	ts := memory.NewTokenStore()
+	vsink := &recordingVaultSink{}
+	p := stream.New(ts, nil, vsink)
+
+	ev := bus.ErasureRequestedEvent("e1", tok, "", day1TS)
+	if err := p.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if erased := vsink.erasedAll(); len(erased) != 0 {
+		t.Fatalf("an erasure with no session_id must erase nothing: %v", erased)
+	}
+}
+
+// TestErasureRequestNoopWithoutVault: with no VAULT configured there is no PII store
+// to erase, so an erasure request is a harmless no-op.
+func TestErasureRequestNoopWithoutVault(t *testing.T) {
+	ts := memory.NewTokenStore()
+	p := stream.New(ts, nil, nil)
+
+	ev := bus.ErasureRequestedEvent("e1", tok, "sess_1", day1TS)
+	if err := p.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("an erasure with no VAULT must be a no-op, got: %v", err)
+	}
+}
+
+// TestErasureRetriesOnError: a DPDP deletion is a compliance obligation, so a
+// transient failure surfaces (the bus redelivers) instead of being dropped, and the
+// retry erases cleanly — leaving PII a principal asked us to forget is never
+// acceptable. vault.Erase is idempotent, so the redelivery is safe.
+func TestErasureRetriesOnError(t *testing.T) {
+	ts := memory.NewTokenStore()
+	vsink := &recordingVaultSink{failsLeft: 1} // fail the first erase
+	p := stream.New(ts, nil, vsink)
+
+	ev := bus.ErasureRequestedEvent("e1", tok, "sess_1", day1TS)
+	if err := p.Handle(context.Background(), ev); err == nil {
+		t.Fatal("an erase failure must surface so the bus redelivers")
+	}
+	if err := p.Handle(context.Background(), ev); err != nil {
+		t.Fatalf("redelivery must erase once the store recovers: %v", err)
+	}
+
+	if erased := vsink.erasedAll(); len(erased) != 1 || erased[0] != "sess_1" {
+		t.Fatalf("recovered fold must erase the session exactly once: %v", erased)
 	}
 }
