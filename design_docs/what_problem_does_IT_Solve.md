@@ -3,8 +3,8 @@
 This document states the problem AgentShield exists to solve: the class of
 **agentic security attacks** and **agentic payment frauds** that appear the
 moment an AI agent — not a human — is the one asking a payments API to move
-money. The attack catalogue is drawn from the product spec
-([`PRODUCT.md`](PRODUCT.md)) and every threat is corroborated against public,
+money. The attack catalogue is drawn from the AgentShield product spec and every
+threat is corroborated against public,
 independently-published industry taxonomies. Links are inline and collected under
 [Sources](#sources). Web landscape captured as of 2026-08-31.
 
@@ -14,7 +14,7 @@ Traditional fraud asks *"is this transaction fraudulent?"*. Agentic payments
 force a strictly larger question:
 
 > **Can we trust the entire chain of decisions that produced this transaction?**
-> — PRODUCT.md §2
+> — the spec §2
 
 The canonical failure the product is built around: a user says *"buy groceries
 under ₹2,000,"* the agent reads some untrusted tool output, and buys a ₹1,800
@@ -68,7 +68,7 @@ phishing agents · invoice-timed / predictive payment fraud · deepfake-as-a-ser
 KYC bypass · synthetic-identity farms · Ghost-Touch / biometric session hijacking ·
 CVE-weaponisation agents · automated chain-hopping money laundering. Its thesis —
 fraud has shifted from *"fraud-at-scale"* to *"fraud-with-agency"* — is the same
-one PRODUCT.md opens with.
+one the spec opens with.
 
 ## Why a classic fraud model does not answer this
 
@@ -85,23 +85,23 @@ load-bearing:
   Chargeback Shield). Those answer *"is this payment bad?"* — probabilistic,
   learned. AgentShield answers *"was this payment asked for?"* — a
   **deterministic** comparison against a registered consent artefact
-  (PRODUCT.md §19, §63).
+  (the spec §19, §63).
 - **It needs no training labels, so it can exist before the fraud does.** The
   core check compares the debit to a stored mandate + intent envelope, not to a
   learned model of past fraud — which is why it can ship on day one, when *"every
-  agent in the world is 0 days old"* (PRODUCT.md §8, §53).
+  agent in the world is 0 days old"* (the spec §8, §53).
 
 ## The boundary that does the work — two invariants
 
 1. **Only the six deterministic predicates (P1–P6) can BLOCK.** The ML engines
    (behavioural, graph, reputation, semantic-intent) may only raise risk to a
    **STEP-UP** — they never refuse on their own. *"A probabilistic signal alone
-   never blocks — not once, anywhere in this product."* (PRODUCT.md §22, §44)
+   never blocks — not once, anywhere in this product."* (the spec §22, §44)
 2. **When anything is missing, stale or slow, the system fails closed to a
    STEP-UP** — never an optimistic ALLOW.
 
 The one identity it enforces end-to-end:
-`AUTHORIZED ACTION = USER-INTENDED ACTION = EXECUTED TRANSACTION` (PRODUCT.md §43).
+`AUTHORIZED ACTION = USER-INTENDED ACTION = EXECUTED TRANSACTION` (the spec §43).
 
 ### The six predicates
 
@@ -115,7 +115,7 @@ The one identity it enforces end-to-end:
 | **P6 binding mismatch** | presented amount ≠ the amount bound to this order at eval time | **BLOCK** (`BLOCKED_BINDING`) |
 
 (The `BLOCKED_*` / `STEPUP_*` strings are the reason codes recorded on the durable
-CHAIN — see [`LIVE_TEST_RESULTS.md`](LIVE_TEST_RESULTS.md). PRODUCT.md itself labels
+CHAIN — see [`LIVE_TEST_RESULTS.md`](LIVE_TEST_RESULTS.md). The spec itself labels
 these P1–P6 with the caller-facing codes `AUTHORIZATION_VIOLATION`,
 `INTENT_MISMATCH`, `UNATTESTED`.)
 
@@ -124,7 +124,7 @@ these P1–P6 with the caller-facing codes `AUTHORIZATION_VIOLATION`,
 Each row is an attack the spec calls out, how it moves money, the AgentShield
 defence, and the public taxonomy it corresponds to.
 
-| # | Attack (PRODUCT.md) | How it moves money | AgentShield defence | Public taxonomy |
+| # | Attack (spec §) | How it moves money | AgentShield defence | Public taxonomy |
 |---|---|---|---|---|
 | 1 | **Prompt injection** (§36) | untrusted content changes the agent's chosen action | not stoppable at the pay layer; detected as **intent mismatch** → STEP-UP/BLOCK; an injection **cannot widen** server-side authority | OWASP **ASI01** Goal Hijack ([owasp]) |
 | 2 | **MCP tool poisoning** (§37) | poisoned tool metadata/response reshapes the plan | tool output is a **feature, never policy** → STEP-UP; verified capability tiers on first-party tools *can* BLOCK | OWASP **ASI02** Tool Misuse, **ASI04** Supply-Chain ([owasp]) |
@@ -142,7 +142,7 @@ cap, right category, known merchant — individually unremarkable. Rate-based fr
 features miss it because nothing is loud; the mandate is simply being drained
 faster than the customer would. The rail-unique signal that catches it —
 `fraction_of_block_consumed` / `projected_exhaustion_seconds` — is the one
-PRODUCT.md treats as most novel (§18, §38, §52).
+the spec treats as most novel (§18, §38, §52).
 
 ## What the system is actually tested against — nine families
 
@@ -164,7 +164,7 @@ signal that these are the *real* problems.
 | `shared_device_ring` | many agents share a device/IP fingerprint | behavioural + graph (weak on *declared* telemetry) | RisingWave #7 Geographic Impossibility ([rw]) |
 | `stale_revoked_token` | debit on an expired/cancelled/exhausted mandate | **P4** → **BLOCK** | mandate-lifecycle check |
 
-## Honest coverage (PRODUCT.md §64)
+## Honest coverage (the spec §64)
 
 The spec grades its own defence rather than claiming uniform protection:
 
@@ -192,8 +192,7 @@ less credible than one that says exactly where it is thin.
 - **Corgilabs — Agentic Commerce Fraud: When AI Agents Start Buying** —
   [corgilabs.ai][corgi].
 - **BCG — How Agentic AI Will Industrialize Financial Scams** — [bcg.com][bcg].
-- Internal: [`PRODUCT.md`](PRODUCT.md) (the product spec) and
-  [`LIVE_TEST_RESULTS.md`](LIVE_TEST_RESULTS.md) (the scored live run).
+- Internal: [`LIVE_TEST_RESULTS.md`](LIVE_TEST_RESULTS.md) — the scored live run.
 
 [owasp]: https://neuraltrust.ai/blog/owasp-agentic-ai-top-10
 [promptfoo]: https://www.promptfoo.dev/docs/red-team/owasp-agentic-ai/
