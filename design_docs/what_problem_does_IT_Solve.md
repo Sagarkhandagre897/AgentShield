@@ -1,12 +1,16 @@
 # AgentShield — what problem does it solve?
 
-This document states the problem AgentShield exists to solve: the class of
-**agentic security attacks** and **agentic payment frauds** that appear the
-moment an AI agent — not a human — is the one asking a payments API to move
+AgentShield is an **agentic fraud detection system**: a deterministic
+authorization boundary that decides *before money moves*, with **three off-clock
+ML engines** — behavioural-anomaly, graph/GNN network-risk, and semantic
+intent-alignment — that learn how agents behave and raise the risk on a debit
+that looks like fraud. This document states the problem it exists to solve: the
+class of **agentic security attacks** and **agentic payment frauds** that appear
+the moment an AI agent — not a human — is the one asking a payments API to move
 money. The attack catalogue is drawn from the AgentShield product spec and every
-threat is corroborated against public,
-independently-published industry taxonomies. Links are inline and collected under
-[Sources](#sources). Web landscape captured as of 2026-08-31.
+threat is corroborated against public, independently-published industry
+taxonomies. Links are inline and collected under [Sources](#sources). Web
+landscape captured as of 2026-08-31.
 
 ## The problem in one line
 
@@ -70,26 +74,35 @@ CVE-weaponisation agents · automated chain-hopping money laundering. Its thesis
 fraud has shifted from *"fraud-at-scale"* to *"fraud-with-agency"* — is the same
 one the spec opens with.
 
-## Why a classic fraud model does not answer this
+## An agentic fraud detection system — not another *transaction*-fraud model
 
-AgentShield is deliberately **not** "another fraud model," and the reasoning is
+AgentShield **is** fraud detection — but for a different fraud, with a different
+mechanism, than a classic transaction-fraud model. The distinction is
 load-bearing:
 
-- **Fraud models learn "normal" from humans.** They key on session rhythm, time
-  on page, typing cadence, the 1 a.m. impulse buy. An agent breaks every one of
-  those signals at once — it *"moves too fast, too cleanly, and too
+- **Transaction-fraud models learn "normal" from humans.** They key on session
+  rhythm, time on page, typing cadence, the 1 a.m. impulse buy. An agent breaks
+  every one of those signals at once — it *"moves too fast, too cleanly, and too
   consistently"* — which is exactly what those models were built to flag, so
-  they make confident mistakes in both directions. ([Corgilabs][corgi])
+  they make confident mistakes in both directions. ([Corgilabs][corgi]) Agentic
+  fraud detection therefore has to model *agents*, not humans — which is what
+  AgentShield's [three learned engines](#how-agentshield-detects-agentic-fraud--three-learned-engines)
+  do.
 - **The question itself is different.** Razorpay already runs mature
   transaction-risk systems (Shield, ACS, Vulcan, COD Intelligence, Bumblebee,
   Chargeback Shield). Those answer *"is this payment bad?"* — probabilistic,
   learned. AgentShield answers *"was this payment asked for?"* — a
   **deterministic** comparison against a registered consent artefact
-  (the spec §19, §63).
-- **It needs no training labels, so it can exist before the fraud does.** The
-  core check compares the debit to a stored mandate + intent envelope, not to a
-  learned model of past fraud — which is why it can ship on day one, when *"every
-  agent in the world is 0 days old"* (the spec §8, §53).
+  (the spec §19, §63) — and then asks *"does this agent's behaviour look like
+  fraud?"* with three ML engines layered on top.
+- **The boundary needs no labels; the models sharpen with them.** The
+  deterministic core compares the debit to a stored mandate + intent envelope,
+  not to a learned model of past fraud — which is why it ships on day one, when
+  *"every agent in the world is 0 days old"* (the spec §8, §53). The three ML
+  engines then learn from **settled outcomes** (disputes, cancellations,
+  confirmed step-ups) and get sharper over time — but they can only ever raise
+  risk toward a step-up, never block. So the system detects agentic fraud from
+  day one and improves as ground truth arrives.
 
 ## The boundary that does the work — two invariants
 
@@ -118,6 +131,46 @@ The one identity it enforces end-to-end:
 CHAIN — see [`LIVE_TEST_RESULTS.md`](LIVE_TEST_RESULTS.md). The spec itself labels
 these P1–P6 with the caller-facing codes `AUTHORIZATION_VIOLATION`,
 `INTENT_MISMATCH`, `UNATTESTED`.)
+
+## How AgentShield detects agentic fraud — three learned engines
+
+The deterministic boundary answers *"was this debit asked for?"*. Layered on top,
+**three off-clock ML engines** answer *"does this agent's behaviour look like
+fraud?"* — the part of the product we prioritised to build and train. Each runs
+on the **async plane** (never on the request path), learns from settled outcomes,
+and deposits exactly **one calibrated figure** the on-clock decision reads by key.
+Crucially, all three can only ever **raise risk toward a STEP-UP — none can
+BLOCK** (a block is the six predicates' alone; see the invariants above).
+
+| Engine (spec §) | Agentic fraud it detects | Technique | Figure |
+|---|---|---|---|
+| **Behavioural-anomaly** (§11, `services/behaviour`) | a principal (agent → customer → token) acting unlike its own past: amount spikes, spend-velocity bursts, the **slow drain**, merchant novelty | streaming per-principal baselines (EWMA/robust-z, P² quantiles, Count-Min/HyperLogLog sketches) → **gradient-boosted trees (LightGBM) + isotonic calibration**, floored by an **isolation-forest** unsupervised anomaly score | `behaviour_deviation` |
+| **Graph / GNN** (§13, `services/graph`) | coordinated rings, mule fan-in, synchronised fleets, shared-device collusion — structure a single-principal view can't see | heterogeneous, inductive, time-aware **GraphSAGE** (PyTorch Geometric) over the agent↔token↔merchant↔device graph, above a **structural floor** (degree/fan-out/component-size) and **label propagation** from settled-fraud seeds | `network_risk` |
+| **Intent-alignment** (§12, `services/intent`) | the debit's merchant/category **drifting** from the intent the customer sealed once per session; unattested sessions | a **sentence-transformer** (`all-MiniLM-L6-v2`) embeds the sealed envelope and each debit; `intent_divergence` = cosine distance ⊕ a small purpose rule (noisy-OR). Not supervised-trained — a sealed-embedding comparison, so there is nothing to fit | `intent_divergence` |
+
+**How they learn.** An off-clock labeler distils **settled outcomes** into
+training labels — a dispute/chargeback → *misuse* (full weight), a mandate
+cancellation → *misuse* (light, 0.5), a **confirmed step-up** (one we asked for,
+then satisfied by a real capture) → *legit*. It takes **no** label from a bare
+undisputed capture ("no complaint" is not proof of consent) and **none** from
+AgentShield's own verdicts. The offline trainer replays historical events back
+through each engine's own feature extractor (train/serve parity) and fits three
+artifacts — `behaviour_gbdt.pkl`, `behaviour_floor.pkl`, `graph_sage.pkl`; the
+intent engine is a recorded no-op (nothing to fit).
+
+**Two more off-clock figures round out the score** — so the honest count is
+*five* inputs, three of them from the ML engines: an **agent-reputation** signal
+(a Bayesian Beta-Bernoulli posterior over each agent's settled history — the one
+figure that *lowers* risk), and **`consumption_frac`**, the model-free
+mandate-drain fraction that catches the slow drain from the very first debit.
+
+**How the figures become a decision.** If any figure is missing or stale, the
+decision **fails closed to a STEP-UP without scoring** — a blank is never an
+optimistic zero. Otherwise the on-clock scorer computes a calibrated probability
+*p* (a logistic over the five figures), multiplies it by the rupees at risk, and
+steps up only when that **expected loss exceeds the interruption cost** — never a
+block. This is enforced by construction and guarded by a test
+(`TestDecideNeverBlocks`): the decision function has no BLOCK branch at all.
 
 ## The attacks AgentShield is built to catch
 
