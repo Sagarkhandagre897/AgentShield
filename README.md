@@ -1,12 +1,15 @@
-# AgentShield
+# AgentShield — an Agentic Fraud Detection System for Agentic Payments
 
-A real-time **Agent Trust & Risk layer** that answers at `POST /v1/orders`,
-before any rupee moves. When an AI agent asks Razorpay to create an order,
-the request is shown to AgentShield first and it returns exactly one of three
-answers — **ALLOW**, **STEP-UP**, or **BLOCK**. Only ALLOW proceeds to the
-payments API and the rails. Because the gate runs before money moves, a wrong
-"no" costs a re-confirmation, not a reversal — which is what lets the whole
-system fail closed without fear.
+A real-time **agentic fraud detection system for agentic payments** that answers
+at `POST /v1/orders`, before any rupee moves. When an AI agent asks Razorpay to
+create an order, the request is shown to AgentShield first and it returns exactly
+one of three answers — **ALLOW**, **STEP-UP**, or **BLOCK**. Only ALLOW proceeds
+to the payments API and the rails. Three off-clock ML engines —
+behavioural-anomaly, graph/GNN network-risk, and semantic intent-alignment —
+learn how agents behave and raise risk on a debit that looks like fraud; a
+deterministic boundary where only six predicates can BLOCK does the enforcing.
+Because the gate runs before money moves, a wrong "no" costs a re-confirmation,
+not a reversal — which is what lets the whole system fail closed without fear.
 
 The full specification lives in [`design_docs/`](design_docs/). This README is
 the map of the code. For *why the product exists* — the agentic security attacks
@@ -159,4 +162,4 @@ CHAIN/VAULT/bus volumes for a clean slate).
 > is the "leave it up and poke at it" counterpart.
 
 ---
-Prepared by Sagar Khandagre — Agentic security.
+Prepared by Sagar Khandagre.
