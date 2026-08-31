@@ -9,7 +9,10 @@ payments API and the rails. Because the gate runs before money moves, a wrong
 system fail closed without fear.
 
 The full specification lives in [`design_docs/`](design_docs/). This README is
-the map of the code.
+the map of the code. For *why the product exists* — the agentic security attacks
+and payment frauds it is built to stop, corroborated against the OWASP Agentic
+Top 10 and the current payment-fraud literature — see
+[`design_docs/PROBLEMS_SOLVED.md`](design_docs/PROBLEMS_SOLVED.md).
 
 ## Two planes that meet at exactly two points
 
