@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentshield-eval"
+version = "0.1.0"
+description = "Phase-7 eval: metrics over a live driver run's collected verdicts vs the generator's synthetic ground truth, per family."
+requires-python = ">=3.10"
+# The metrics core is numpy-only, so the library and its tests run without the
+# notebook stack. The notebook itself (notebook/eval.ipynb) additionally uses
+# matplotlib + pandas + jupyter — declared as the optional [notebook] extra.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+notebook = ["jupyter", "matplotlib>=3.7", "pandas>=2.0", "ipykernel", "nbconvert"]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["agentshield_eval"]

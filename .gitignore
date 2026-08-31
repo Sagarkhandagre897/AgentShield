@@ -16,6 +16,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.ipynb_checkpoints/
 
 # Editor / OS
 .DS_Store
