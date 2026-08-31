@@ -12,7 +12,7 @@ The full specification lives in [`design_docs/`](design_docs/). This README is
 the map of the code. For *why the product exists* — the agentic security attacks
 and payment frauds it is built to stop, corroborated against the OWASP Agentic
 Top 10 and the current payment-fraud literature — see
-[`design_docs/PROBLEMS_SOLVED.md`](design_docs/PROBLEMS_SOLVED.md).
+[`design_docs/what_problem_does_IT_Solve.md`](design_docs/what_problem_does_IT_Solve.md).
 
 ## Two planes that meet at exactly two points
 
