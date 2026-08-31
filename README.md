@@ -16,7 +16,9 @@ the map of the code.
 - **Synchronous plane — on the clock.** One stateless Go service in front of
   three keyed stores. It resolves a token, runs six integer checks, reads a row
   of precomputed figures, scores and decides — and replies *before* it tells the
-  bus anything. p99 ≤ 50 ms, ~21 ms typical.
+  bus anything. Budget p99 ≤ 50 ms; a live loopback run measures ~3 ms typical
+  (p50) and p99 ≈ 6 ms — see
+  [`design_docs/LIVE_TEST_RESULTS.md`](design_docs/LIVE_TEST_RESULTS.md#on-clock-latency).
 - **Asynchronous plane — off the clock.** A durable bus and six workers (Go for
   stream-joins, Python for the models) that recompute baselines, models,
   embeddings and reputation, and leave each result behind as one calibrated
@@ -127,6 +129,22 @@ MARQUEE — representative verdicts, read back from the durable CHAIN
 The full scored output of one such run — per-family accuracy, the marquee, and the
 durable CHAIN/VAULT state read back from Postgres — is recorded in
 [`design_docs/LIVE_TEST_RESULTS.md`](design_docs/LIVE_TEST_RESULTS.md).
+
+**Measure the on-clock latency** against the same already-running stack.
+`demo/latency_test.py` primes one legit request onto the full ALLOW path (reusing
+live_test's seed/seal/pre-warm phases) and hands the timing loop to the
+`cmd/latencyprobe` Go binary — 2000 sequential `Evaluate` calls, a fresh
+`evaluation_id` + `nonce` on each so none trips P1 replay and every one stays on
+the full seven-stage ALLOW path:
+
+```bash
+/home/sagar/.venvs/agentshield/bin/python demo/latency_test.py --seed 7
+```
+
+A green run reports **~3 ms typical** (p50) with p99 ≈ 6 ms, comfortably inside the
+50 ms budget; the full distribution and the "is there an off-the-shelf tool" answer
+(ghz / grpcurl) are in
+[`design_docs/LIVE_TEST_RESULTS.md`](design_docs/LIVE_TEST_RESULTS.md#on-clock-latency).
 
 Nothing is torn down — teardown stays your call:
 `docker compose -f deploy/docker-compose.yml down -v` (the `-v` also drops the

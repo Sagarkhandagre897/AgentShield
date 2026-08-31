@@ -133,6 +133,55 @@ ground truth for the next model refit:
 labels: 84 observed {'confirmed_step_up': 40, 'dispute': 42, 'cancellation': 2}
 ```
 
+## On-clock latency
+
+Correctness is one axis; the on-clock plane also has a time budget — the design
+targets **p99 ≤ 50 ms**. Measured on the same live split-process stack (clean
+slate, seed 7) by [`demo/latency_test.py`](../demo/latency_test.py), which primes
+the world so a legit request ALLOWs and then hands the timing loop to the
+`cmd/latencyprobe` Go binary: **2000** sequential `Evaluate` calls (200 warmup,
+concurrency 1), each stamped with a fresh `evaluation_id` + `nonce` so every one
+stays on the full ALLOW path. All 2000 returned ALLOW.
+
+| statistic | latency |
+|---|---:|
+| min | 1.73 ms |
+| mean | 3.16 ms |
+| **p50 (median)** | **3.00 ms** |
+| p90 | 4.03 ms |
+| p95 | 4.53 ms |
+| p99 | 6.37 ms |
+| max | 49.24 ms (lone outlier) |
+| throughput | ~315 calls/s (sequential, one in flight) |
+
+**Typical ≈ 3 ms** (p50/mean), with a ~1.7 ms floor — comfortably inside the
+50 ms budget, with p99 ≈ 6 ms an order of magnitude under it. The path being
+timed is the whole seven-stage clock: gRPC in → three keyed Redis reads (token,
+block-state, overlay) → the P1–P6 spine → one keyed Redis multi-get for the
+feature row → score → decide → reply. The `decision.made` publish is
+fire-and-forget in a detached goroutine, so it is *not* on the clock this measures.
+
+Two honest caveats: the single 49 ms `max` is one call in 2000 (0.05%) — a GC or
+scheduler blip, not representative. And because each measured ALLOW publishes a
+`decision.made` that the worker folds back as a spent nonce, the token's
+block-state grows over the run, nudging the median up from the ~1.7 ms cold floor;
+it still holds at ~3 ms.
+
+### Is there a tool for this?
+
+Yes — general-purpose gRPC benchmarking tools exist: **[ghz](https://ghz.sh)** (the
+gRPC analogue of `hey`/`wrk`, reports latency percentiles and throughput) and
+**grpcurl** for single ad-hoc calls. They work against any gRPC endpoint. The
+catch for AgentShield is that `Evaluate` only ALLOWs for a *valid, primed,
+non-replayed* `OrderContext`: a generic tool firing a static payload would need a
+hand-built valid request, and after the first `decision.made` folds, every repeat
+would trip **P1 replay** and start timing the short-circuit BLOCK path instead of
+the full ALLOW path. That is why this repo ships `cmd/latencyprobe` — it reuses
+the real generated bindings against a driver-primed world and rotates the nonce
+per call, so it measures the true full-ALLOW latency. Reach for `ghz` if you want
+an off-the-shelf load generator and are happy to construct and rotate the payload
+yourself.
+
 ## What this proves
 
 - The full **on-clock → off-clock** loop runs across real transport: gRPC to the
