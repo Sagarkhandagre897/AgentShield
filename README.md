@@ -1,5 +1,10 @@
 # AgentShield — an Agentic Fraud Detection System for Agentic Payments
 
+> [!TIP]
+> **📄 Product demonstration deck (PDF) —** [`AgentShield_FraudDetectionSystem.pdf`](design_docs/AgentShield_FraudDetectionSystem.pdf)
+> A four-part walkthrough with clickable sources and diagram links: **1 ·** the
+> problem, **2 ·** the solution, **3 ·** the architecture, **4 ·** proven live.
+
 A real-time **agentic fraud detection system for agentic payments** that answers
 at `POST /v1/orders`, before any rupee moves. When an AI agent asks Razorpay to
 create an order, the request is shown to AgentShield first and it returns exactly
