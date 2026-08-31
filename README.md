@@ -17,6 +17,16 @@ and payment frauds it is built to stop, corroborated against the OWASP Agentic
 Top 10 and the current payment-fraud literature — see
 [`design_docs/what_problem_does_IT_Solve.md`](design_docs/what_problem_does_IT_Solve.md).
 
+## System design diagrams
+
+Three rendered diagrams capture the design end to end — open any of them:
+
+| Diagram | What it shows | Open |
+|---|---|---|
+| **System design architecture** | the two planes, their keyed stores, and the two seams (bus down, one figure up) where they meet | [mermaid.ai&nbsp;↗](https://mermaid.ai/d/eb1955d5-ea21-431e-9e81-057ff2ccd075) |
+| **Decision flow chart** | *who is allowed to say no* — every ML path folds back to a STEP-UP; only the six predicates (P1–P6) reach a BLOCK | [mermaid.ai&nbsp;↗](https://mermaid.ai/d/b07b29a1-97cd-4ba8-9942-f8e7a20cf9b7) |
+| **System sequence diagram** | the end-to-end ordering — the verdict is returned *before* the capture, which is what makes a wrong "no" cost a re-confirmation, not a reversal | [mermaid.ai&nbsp;↗](https://mermaid.ai/d/d89100cd-418b-4450-99e2-08c4ec94f06b) |
+
 ## Two planes that meet at exactly two points
 
 - **Synchronous plane — on the clock.** One stateless Go service in front of
