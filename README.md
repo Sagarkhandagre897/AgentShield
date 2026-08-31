@@ -124,6 +124,10 @@ MARQUEE — representative verdicts, read back from the durable CHAIN
   revoked-token BLOCK   eval_00053  BLOCK/BLOCKED_AUTHORITY   BLOCK/BLOCKED_AUTHORITY   ✓
 ```
 
+The full scored output of one such run — per-family accuracy, the marquee, and the
+durable CHAIN/VAULT state read back from Postgres — is recorded in
+[`design_docs/LIVE_TEST_RESULTS.md`](design_docs/LIVE_TEST_RESULTS.md).
+
 Nothing is torn down — teardown stays your call:
 `docker compose -f deploy/docker-compose.yml down -v` (the `-v` also drops the
 CHAIN/VAULT/bus volumes for a clean slate).
