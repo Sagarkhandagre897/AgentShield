@@ -64,5 +64,74 @@ make test    # run the suite
 
 Requires Go 1.25+, `protoc` with `protoc-gen-go` and `protoc-gen-go-grpc`.
 
+## Run it live
+
+`make test` proves the two planes in-process. To watch real traffic cross the
+wire — a decision service answering over gRPC, a worker folding events off a
+real bus, verdicts landing in a durable Postgres CHAIN — bring the split-process
+stack up and drive a generated world through it. Three steps.
+
+**1. Bring up the infrastructure** (Redpanda + Redis + Postgres, and the one-shot
+that creates the six topics). These three are the *only* containers — the two app
+hosts run on the host, so Docker Desktop shows exactly three:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --wait redpanda redis postgres
+docker compose -f deploy/docker-compose.yml up -d topic-init
+docker compose -f deploy/docker-compose.yml wait topic-init   # exits 0 once topics exist
+```
+
+**2. Start the two planes against it.** Setting `REDIS_ADDR` + `KAFKA_SEEDS`
+selects split-process mode; in split mode the worker owns the durable CHAIN +
+VAULT (`POSTGRES_DSN`), and the decision service runs dev-mode (no mTLS, caller
+identity `dev-caller`). Leave both running in their own shells:
+
+```bash
+# off-clock plane — stream-processor, materialiser, reputation-builder, labeler
+REDIS_ADDR=localhost:6379 KAFKA_SEEDS=localhost:19092 \
+POSTGRES_DSN='postgres://agentshield:agentshield@localhost:5432/agentshield?sslmode=disable' \
+go run ./cmd/worker
+```
+
+```bash
+# on-clock plane — the Evaluate gRPC service, listening on :8443
+REDIS_ADDR=localhost:6379 KAFKA_SEEDS=localhost:19092 \
+AGENTSHIELD_INTERRUPTION_COST_PAISE=100000 \
+AGENTSHIELD_STALENESS_BUDGET_SECONDS=0 \
+AGENTSHIELD_ADDR=:8443 \
+go run ./cmd/decision
+```
+
+**3. Drive traffic through the live stack.** `demo/live_test.py` assumes the
+stack and both hosts are already up and leaves everything running. It spawns only
+`cmd/driverkit` (the same NDJSON arm the eval harness uses), replays a generated
+scenario through the tested orchestrator, and prints the on-clock verdict spread,
+a marquee of representative verdicts read back from the durable CHAIN (one per
+class, including a P1 replay BLOCK), and the settled training labels:
+
+```bash
+/home/sagar/.venvs/agentshield/bin/python demo/live_test.py --seed 7
+```
+
+It needs no install (pure stdlib) and sets its own import path. A green run reads:
+
+```
+timeline: 78 debits -> 31 ALLOW / 40 STEP_UP / 7 BLOCK
+debits=78 evaluated=78 decision_acc=1.0 code_acc=1.0
+MARQUEE — representative verdicts, read back from the durable CHAIN
+  legit ALLOW           eval_00001  ALLOW/OK_ALLOW            ALLOW/OK_ALLOW            ✓
+  replay BLOCK (P1)     eval_00048  BLOCK/BLOCKED_DUPLICATE   BLOCK/BLOCKED_DUPLICATE   ✓
+  revoked-token BLOCK   eval_00053  BLOCK/BLOCKED_AUTHORITY   BLOCK/BLOCKED_AUTHORITY   ✓
+```
+
+Nothing is torn down — teardown stays your call:
+`docker compose -f deploy/docker-compose.yml down -v` (the `-v` also drops the
+CHAIN/VAULT/bus volumes for a clean slate).
+
+> `python -m agentshield_driver --seed 7` (from `services/driver/`) is the other
+> way to see the same loop: it owns the *whole* lifecycle — brings the stack and
+> both hosts up, scores the run, and tears it all back down. `demo/live_test.py`
+> is the "leave it up and poke at it" counterpart.
+
 ---
 Prepared by Sagar Khandagre — Agentic security.
