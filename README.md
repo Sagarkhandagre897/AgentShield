@@ -1,3 +1,5 @@
+## Full Explanation Video (System Design) - https://www.youtube.com/watch?v=9ZtMygMhLgw 
+
 # AgentShield — an Agentic Fraud Detection System for Agentic Payments
 
 > [!TIP]
